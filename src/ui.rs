@@ -98,7 +98,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Mode::Diff => Span::styled(" DIFF ", Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)),
         Mode::PrBrowser => Span::styled(" PRs ", Style::default().fg(BG).bg(YELLOW).add_modifier(Modifier::BOLD)),
     };
-    let orgs = Span::styled(" maxsystems · acv-auctions ", Style::default().fg(GRAY).bg(BG1));
+    let orgs = Span::styled(format!(" {} ", app.orgs.join(" · ")), Style::default().fg(GRAY).bg(BG1));
     f.render_widget(
         Paragraph::new(Line::from(vec![mode_label, orgs])).style(Style::default().bg(BG1)),
         area,

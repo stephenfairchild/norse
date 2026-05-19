@@ -90,25 +90,20 @@ pub struct RepoPreview {
 pub struct GithubClient {
     client: Client,
     token: String,
+    pub orgs: Vec<String>,
 }
 
 impl GithubClient {
-    pub fn new(token: String) -> Result<Self> {
+    pub fn new(token: String, orgs: Vec<String>) -> Result<Self> {
         let client = Client::builder().user_agent("acv-terminal/0.1").build()?;
-        Ok(Self { client, token })
+        Ok(Self { client, token, orgs })
     }
 
-    // Searches both orgs in parallel and deduplicates by repo.
     pub async fn search_repos(&self, query: &str) -> Result<Vec<String>> {
-        let (r1, r2) = tokio::join!(
-            self.search_org(query, "maxsystems"),
-            self.search_org(query, "acv-auctions"),
-        );
-
         let mut seen = HashSet::new();
         let mut repos = Vec::new();
-        for result in [r1, r2] {
-            for repo in result.unwrap_or_default() {
+        for org in &self.orgs {
+            for repo in self.search_org(query, org).await.unwrap_or_default() {
                 if seen.insert(repo.clone()) {
                     repos.push(repo);
                 }
@@ -171,14 +166,9 @@ impl GithubClient {
     }
 
     pub async fn search_prs(&self) -> Result<Vec<PrItem>> {
-        let (r1, r2, r3) = tokio::join!(
-            self.search_org_prs("maxsystems"),
-            self.search_org_prs("acv-auctions"),
-            self.search_org_prs("monkvision"),
-        );
         let mut prs = Vec::new();
-        for result in [r1, r2, r3] {
-            prs.extend(result.unwrap_or_default());
+        for org in &self.orgs {
+            prs.extend(self.search_org_prs(org).await.unwrap_or_default());
         }
         prs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         prs.truncate(100);

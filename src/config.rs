@@ -10,6 +10,7 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct GithubConfig {
     pub token: String,
+    pub orgs: Vec<String>,
 }
 
 impl Config {

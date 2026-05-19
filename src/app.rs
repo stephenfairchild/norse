@@ -53,6 +53,7 @@ pub struct App {
     pub mode: Mode,
     pub should_quit: bool,
     pub needs_clear: bool,
+    pub orgs: Vec<String>,
     pub search: SearchState,
     pub focus: Focus,
     pub picker_insert: bool,
@@ -113,10 +114,14 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let github = Config::load()
-            .and_then(|c| GithubClient::new(c.github.token))
-            .ok()
-            .map(Arc::new);
+        let (orgs, github) = match Config::load() {
+            Ok(c) => {
+                let orgs = c.github.orgs.clone();
+                let gh = GithubClient::new(c.github.token, c.github.orgs).ok().map(Arc::new);
+                (orgs, gh)
+            }
+            Err(_) => (Vec::new(), None),
+        };
         let llm = LlmClient::from_claude_settings().ok().map(Arc::new);
         let (diff_tx, diff_rx) = mpsc::channel(4);
         let (summary_tx, summary_rx) = mpsc::channel(4);
@@ -138,6 +143,7 @@ impl App {
             mode: Mode::Normal,
             should_quit: false,
             needs_clear: false,
+            orgs,
             search: SearchState::new(),
             focus: Focus::Results,
             picker_insert: true,
