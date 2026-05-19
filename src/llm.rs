@@ -1,0 +1,243 @@
+use anyhow::Result;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+pub struct LlmClient {
+    client: Client,
+    auth_token: String,
+    base_url: String,
+    model: String,
+}
+
+#[derive(Serialize)]
+struct Request<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    messages: Vec<Msg<'a>>,
+}
+
+#[derive(Serialize)]
+struct Msg<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    content: Vec<Block>,
+}
+
+#[derive(Deserialize)]
+struct Block {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
+
+impl LlmClient {
+    pub fn from_claude_settings() -> Result<Self> {
+        let home = std::env::var("HOME")?;
+        let raw = std::fs::read_to_string(format!("{}/.claude/settings.json", home))?;
+        let json: serde_json::Value = serde_json::from_str(&raw)?;
+        let env = json["env"].as_object()
+            .ok_or_else(|| anyhow::anyhow!("no env in settings.json"))?;
+
+        let get = |k: &str| -> Result<String> {
+            env.get(k)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| anyhow::anyhow!("{} not found in settings.json", k))
+        };
+
+        let client = Client::builder().user_agent("acv-terminal/0.1").build()?;
+        Ok(Self {
+            client,
+            auth_token: get("ANTHROPIC_AUTH_TOKEN")?,
+            base_url: get("ANTHROPIC_BASE_URL")?,
+            model: get("ANTHROPIC_MODEL")?,
+        })
+    }
+
+    pub async fn summarize_diff(&self, diff: &str) -> Result<String> {
+        let content = if diff.len() > 8000 { &diff[..8000] } else { diff };
+        let prompt = format!(
+            r#"Summarize this git diff in 2-4 bullet points. Be brief and high-level only.
+- For UI changes: list affected routes (e.g. /dashboard, /settings/:id).
+- For API changes: list affected endpoints (e.g. GET /api/users).
+- For other changes: one short phrase describing what changed.
+
+Diff:
+{}"#,
+            content
+        );
+
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+
+        let resp: Response = self.client
+            .post(&url)
+            .header("x-api-key", &self.auth_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&Request {
+                model: &self.model,
+                max_tokens: 256,
+                messages: vec![Msg { role: "user", content: &prompt }],
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(resp.content.into_iter()
+            .filter(|b| b.kind == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    pub async fn ask_repo(&self, repo: &str, question: &str, progress: tokio::sync::mpsc::Sender<String>) -> Result<String> {
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let repo_url = format!("https://github.com/{}", repo);
+
+        let tool = json!({
+            "name": "github_cli",
+            "description": "Run a read-only gh CLI command to fetch information from a GitHub repository. Use this to look up READMEs, file contents, issues, PRs, releases, and other repo data.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A read-only gh CLI command, e.g. 'gh api repos/owner/repo/readme --jq .content | base64 -d' or 'gh api repos/owner/repo/contents/src/main.rs --jq .content | base64 -d'"
+                    }
+                },
+                "required": ["command"]
+            }
+        });
+
+        let mut messages: Vec<serde_json::Value> = vec![
+            json!({"role": "user", "content": question}),
+        ];
+
+        for _ in 0..20 {
+            let body = json!({
+                "model": self.model,
+                "max_tokens": 1024,
+                "system": format!("You are a code assistant for the GitHub repo {}. Use the github_cli tool to read from the repo and answer the question. Only use read-only commands.", repo_url),
+                "tools": [tool],
+                "messages": messages,
+            });
+
+            let resp: serde_json::Value = self.client
+                .post(&url)
+                .header("x-api-key", &self.auth_token)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+
+            let stop_reason = resp["stop_reason"].as_str().unwrap_or("").to_string();
+            let content = resp["content"].as_array().cloned().unwrap_or_default();
+
+            messages.push(json!({"role": "assistant", "content": content}));
+
+            if stop_reason == "tool_use" {
+                let mut tool_results: Vec<serde_json::Value> = Vec::new();
+                for block in &content {
+                    if block["type"].as_str() == Some("tool_use") {
+                        let id = block["id"].as_str().unwrap_or("").to_string();
+                        let command = block["input"]["command"].as_str().unwrap_or("").to_string();
+                        let _ = progress.send(format!("$ {}", command)).await;
+                        let output = run_gh_command(&command).await;
+                        let _ = progress.send(format!("  {} bytes", output.len())).await;
+                        tool_results.push(json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": output,
+                        }));
+                    }
+                }
+                messages.push(json!({"role": "user", "content": tool_results}));
+            } else {
+                let text: String = content.iter()
+                    .filter(|b| b["type"].as_str() == Some("text"))
+                    .filter_map(|b| b["text"].as_str().map(String::from))
+                    .collect::<Vec<_>>()
+                    .join("");
+                return Ok(text);
+            }
+        }
+
+        Ok("Reached tool call limit without a final answer.".into())
+    }
+
+    pub async fn ask_diff(&self, diff: &str, repo: &str, question: &str) -> Result<String> {
+        let content = if diff.len() > 8000 { &diff[..8000] } else { diff };
+        let repo_url = format!("https://github.com/{}", repo);
+        let prompt = format!(
+            "You are a code review assistant. Repo: {}\n\nDiff:\n{}\n\nQuestion: {}\n\nAnswer briefly and directly.",
+            repo_url, content, question
+        );
+
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+
+        let resp: Response = self.client
+            .post(&url)
+            .header("x-api-key", &self.auth_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&Request {
+                model: &self.model,
+                max_tokens: 512,
+                messages: vec![Msg { role: "user", content: &prompt }],
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(resp.content.into_iter()
+            .filter(|b| b.kind == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+}
+
+async fn run_gh_command(command: &str) -> String {
+    let cmd = command.trim();
+    if !is_safe_gh_command(cmd) {
+        return "Error: only read-only gh commands are permitted.".to_string();
+    }
+    match tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .await
+    {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            // Limit output to 4000 chars so it fits back into context
+            let out = if stdout.is_empty() { stderr } else { stdout };
+            if out.len() > 4000 { out[..4000].to_string() } else { out }
+        }
+        Err(e) => format!("Error: {}", e),
+    }
+}
+
+fn is_safe_gh_command(cmd: &str) -> bool {
+    if !cmd.starts_with("gh ") {
+        return false;
+    }
+    // Block any write operations
+    let blocked = [
+        "--method POST", "--method PUT", "--method DELETE", "--method PATCH",
+        " create", " delete", " close", " merge", " edit", " add", " remove",
+        " update", " set", " enable", " disable", " deploy",
+    ];
+    !blocked.iter().any(|b| cmd.contains(b))
+}
