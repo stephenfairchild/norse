@@ -424,19 +424,85 @@ impl GithubClient {
         #[derive(Deserialize)]
         struct Comment { user: CommentUser, body: String, created_at: String }
         #[derive(Deserialize)]
+        struct Review { user: CommentUser, body: String, submitted_at: String }
+        #[derive(Deserialize)]
         struct CommentUser { login: String }
-        let comments: Vec<Comment> = self.client
-            .get(format!("{}/repos/{}/issues/{}/comments", self.base_url, repo, number))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .query(&[("per_page", "30")])
-            .send().await?.error_for_status()?.json().await?;
-        Ok(comments.into_iter().map(|c| PrComment {
-            author: c.user.login,
-            body: c.body.lines().next().unwrap_or("").trim().to_string(),
-            created_at: c.created_at,
-        }).collect())
+
+        let auth = format!("Bearer {}", self.token);
+        let headers = [
+            ("Authorization", auth.as_str()),
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2022-11-28"),
+        ];
+
+        let (issue_comments, review_comments, reviews) = tokio::join!(
+            self.client
+                .get(format!("{}/repos/{}/issues/{}/comments", self.base_url, repo, number))
+                .header(headers[0].0, headers[0].1)
+                .header(headers[1].0, headers[1].1)
+                .header(headers[2].0, headers[2].1)
+                .query(&[("per_page", "50")])
+                .send(),
+            self.client
+                .get(format!("{}/repos/{}/pulls/{}/comments", self.base_url, repo, number))
+                .header(headers[0].0, headers[0].1)
+                .header(headers[1].0, headers[1].1)
+                .header(headers[2].0, headers[2].1)
+                .query(&[("per_page", "50")])
+                .send(),
+            self.client
+                .get(format!("{}/repos/{}/pulls/{}/reviews", self.base_url, repo, number))
+                .header(headers[0].0, headers[0].1)
+                .header(headers[1].0, headers[1].1)
+                .header(headers[2].0, headers[2].1)
+                .query(&[("per_page", "50")])
+                .send(),
+        );
+
+        let mut all: Vec<PrComment> = Vec::new();
+
+        if let Ok(resp) = issue_comments {
+            if let Ok(list) = resp.error_for_status() {
+                if let Ok(comments) = list.json::<Vec<Comment>>().await {
+                    for c in comments {
+                        let body = c.body.lines().next().unwrap_or("").trim().to_string();
+                        if !body.is_empty() {
+                            all.push(PrComment { author: c.user.login, body, created_at: c.created_at });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(resp) = review_comments {
+            if let Ok(list) = resp.error_for_status() {
+                if let Ok(comments) = list.json::<Vec<Comment>>().await {
+                    for c in comments {
+                        let body = c.body.lines().next().unwrap_or("").trim().to_string();
+                        if !body.is_empty() {
+                            all.push(PrComment { author: c.user.login, body, created_at: c.created_at });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(resp) = reviews {
+            if let Ok(list) = resp.error_for_status() {
+                if let Ok(review_list) = list.json::<Vec<Review>>().await {
+                    for r in review_list {
+                        // Skip pure approval/dismissal events with no message body
+                        let body = r.body.lines().next().unwrap_or("").trim().to_string();
+                        if !body.is_empty() {
+                            all.push(PrComment { author: r.user.login, body, created_at: r.submitted_at });
+                        }
+                    }
+                }
+            }
+        }
+
+        all.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(all)
     }
 
     pub async fn comment_on_pr(&self, repo: &str, number: u32, body: &str) -> Result<()> {
