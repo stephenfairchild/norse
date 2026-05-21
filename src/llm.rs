@@ -72,12 +72,12 @@ impl LlmClient {
 ## Summary
 2-4 bullet points, high-level only.
 - For UI changes: list affected routes (e.g. /dashboard, /settings/:id).
-- For API changes: list affected endpoints (e.g. GET /api/users).
+- For API changes: you MUST list every changed endpoint with its full HTTP method and path, and describe any request/response payload changes (added/removed/renamed fields, type changes, new required fields). Be explicit — do not summarize vaguely.
 - For other changes: one short phrase describing what changed.
 
 ## Usage
 One sentence describing what the new thing does, followed by a minimal code example showing how to use it.
-- New API endpoint → curl example
+- New or changed API endpoint → curl example showing the full route, all required headers, and a realistic request body with every field. If the response shape changed, show the new response JSON too.
 - New function/method → call-site code example in the repo's language
 - Config change → example config snippet
 - UI route → example URL or component usage
