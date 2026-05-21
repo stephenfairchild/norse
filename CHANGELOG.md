@@ -1,12 +1,42 @@
 #### Features
+- c9d340c67aa2e60b31f30bdc371c842d2b797ee9 - show ~/.norsedata cache size on splash screen - @stephenfairchild, Claude Sonnet 4.6
+
+- 780fd3c92e9e555b04c1ef2668b3c93745ca51a0 - cache PR summaries in ~/.norsedata/repos/ and use as LLM context - @stephenfairchild, Claude Sonnet 4.6
+
+- 61a4ac7422f68d7bd7dd4ade13babfda0540a24c - always require curl example for any API change - @stephenfairchild, Claude Sonnet 4.6
+
+- 1a1a9d143902900d481be495d7cdbdfebb6c39d1 - require full API details in summary when diff contains API changes - @stephenfairchild, Claude Sonnet 4.6
+
+- a69028820172b1927026dd48dc4934da069d157b - add ## Usage section with code example to AI diff summary - @stephenfairchild, Claude Sonnet 4.6
+
+- 86298007a35956ddf53e0dc588866ade30033a21 - show PR comments below AI summary in diff view - @stephenfairchild, Claude Sonnet 4.6
+
+- 030a3eed5c9ca14dd0700cfa4b74817ec85096a8 - press R in diff view to post a PR comment - @stephenfairchild, Claude Sonnet 4.6
+
+- 55902f48144d9588266a995f56bd44ba6651f460 - add PR metadata status bar above AI summary in diff view - @stephenfairchild, Claude Sonnet 4.6
+
+- 4148b4185c8ec1742f551242fb3f3c55dc86c4f5 - persist approved PRs to ~/.norsedata/prs-approved - @stephenfairchild, Claude Sonnet 4.6
+
+- 225f6de48b4210f106050a839568cc4dcbdb4f9a - add PR approval, news activity, recently closed, and Jira extraction - @stephenfairchild, Claude Sonnet 4.6
+
+- 98819ca71c73aa23787c4645df1e83d16b3a1449 - add model picker with persistence via ~/.norsedata/model - @stephenfairchild, Claude Sonnet 4.6
+
 - 8a6be7ec3cdb0abffb02d59fcd0d8d23e460817f - read config from ~/.norse instead of config.toml - @stephenfairchild, Claude Sonnet 4.6
 
 - d8abe418e0dab46a8b6e9252f5054ef99cc44702 - make org configurable - @stephenfairchild
 
 #### Bug Fixes
+- eccde7467c10eb1c5da01fefc32deede5006a223 - show all timestamps as relative time, not raw dates - @stephenfairchild, Claude Sonnet 4.6
+
+- 4ffe7f2aa8308cad059d7dc900f9394900511e77 - fetch all PR comment types, not just issue-level discussion - @stephenfairchild, Claude Sonnet 4.6
+
+- 6be1665e8c127c5c8b5092fb4f29c7256f50dd11 - load live approval state from GitHub when opening a PR diff - @stephenfairchild, Claude Sonnet 4.6
+
 - de62545fb85cd835ebe84ea537dcff2ce2b5b7b2 - rename acv-terminal to norse in user-agent strings - @stephenfairchild, Claude Sonnet 4.6
 
 #### Documentation
+- b234255861909b568540951c74193cf4f44404cf - fix repo owner in install URLs - @stephenfairchild, Claude Sonnet 4.6
+
 - 5c772f5e243073d4737c3a7a570582cfeda6e186 - add install instructions and fix test config path - @stephenfairchild, Claude Sonnet 4.6
 
 - 6232c5493c05e9942a151e15fcaea3bcddc2a6be - add README - @stephenfairchild, Claude Sonnet 4.6
@@ -42,6 +72,10 @@
 - b0ae6beeb1bbc70b0d9d449f16868165ae70ea87 - add GitHub Actions workflows and commitlint - @stephenfairchild, Claude Sonnet 4.6
 
 #### Miscellaneous Chores
+- 48fcd5c44d43add4c5228282eaccadef9581a836 - release v0.1.0 - @stephenfairchild
+
+- 3895f23307e8b656e56fe1b820e0c32ddde857d2 - release v0.1.0 - stephenfairchild
+
 - f1a03de11af09cee73ca6b7d4711adf34e542118 - trigger release-please - @stephenfairchild, Claude Sonnet 4.6
 
 - 4116eacbd7cf452737de91b02b91126afc37c707 - reset manifest to 0.0.0 so release-please picks up all commits - @stephenfairchild, Claude Sonnet 4.6
