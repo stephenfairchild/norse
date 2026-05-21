@@ -77,7 +77,7 @@ impl LlmClient {
 
 ## Usage
 One sentence describing what the new thing does, followed by a minimal code example showing how to use it.
-- New or changed API endpoint → curl example showing the full route, all required headers, and a realistic request body with every field. If the response shape changed, show the new response JSON too.
+- Any API change (new, modified, or removed endpoint) → you MUST show a curl example. Include the full route, all required headers, and a realistic request body with every field. If the response shape changed, show the new response JSON as a comment below the curl. No exceptions.
 - New function/method → call-site code example in the repo's language
 - Config change → example config snippet
 - UI route → example URL or component usage
