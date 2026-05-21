@@ -26,23 +26,23 @@ Download a pre-built binary from the [releases page](../../releases) and put it 
 
 ```sh
 # macOS (Apple Silicon)
-curl -L https://github.com/acv-auctions/norse/releases/latest/download/norse-macos-arm64 -o /usr/local/bin/norse
+curl -L https://github.com/stephenfairchild/norse/releases/latest/download/norse-macos-arm64 -o /usr/local/bin/norse
 chmod +x /usr/local/bin/norse
 
 # macOS (Intel)
-curl -L https://github.com/acv-auctions/norse/releases/latest/download/norse-macos-amd64 -o /usr/local/bin/norse
+curl -L https://github.com/stephenfairchild/norse/releases/latest/download/norse-macos-amd64 -o /usr/local/bin/norse
 chmod +x /usr/local/bin/norse
 
 # Linux (x86-64)
-curl -L https://github.com/acv-auctions/norse/releases/latest/download/norse-linux-amd64 -o /usr/local/bin/norse
+curl -L https://github.com/stephenfairchild/norse/releases/latest/download/norse-linux-amd64 -o /usr/local/bin/norse
 chmod +x /usr/local/bin/norse
 
 # Linux (ARM64)
-curl -L https://github.com/acv-auctions/norse/releases/latest/download/norse-linux-arm64 -o /usr/local/bin/norse
+curl -L https://github.com/stephenfairchild/norse/releases/latest/download/norse-linux-arm64 -o /usr/local/bin/norse
 chmod +x /usr/local/bin/norse
 
 # Windows (x86-64) — run in PowerShell
-curl -L https://github.com/acv-auctions/norse/releases/latest/download/norse-windows-amd64.exe -o norse.exe
+curl -L https://github.com/stephenfairchild/norse/releases/latest/download/norse-windows-amd64.exe -o norse.exe
 ```
 
 Or build from source (requires [Rust](https://rustup.rs)):
