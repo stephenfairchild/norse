@@ -189,13 +189,13 @@ def norse(mock_server, tmp_path):
 
     session = f"norse-{os.getpid()}-{int(time.time() * 1000) % 100000}"
 
-    (tmp_path / "config.toml").write_text(
-        '[github]\ntoken = "test-token"\norgs = ["test-org"]\n'
-    )
-
     # fake HOME: no claude settings → no LLM, no side effects
     fake_home = tmp_path / "home"
     fake_home.mkdir()
+
+    (fake_home / ".norse").write_text(
+        '[github]\ntoken = "test-token"\norgs = ["test-org"]\n'
+    )
 
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", session, "-x", "220", "-y", "50"],
@@ -203,7 +203,6 @@ def norse(mock_server, tmp_path):
     )
 
     launch = (
-        f"cd {tmp_path} && "
         f"HOME={fake_home} "
         f"NORSE_GITHUB_API={mock_server} "
         f"{BINARY}"
