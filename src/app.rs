@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use crate::config::Config;
+use crate::cache::{load_pr_cache, load_repo_context, save_pr_cache};
 use crate::github::{extract_jira, GithubClient, PrComment, PrItem, RepoActivity, RepoPreview};
 use crate::llm::LlmClient;
 use crate::search::{SearchResult, SearchState};
@@ -347,10 +348,25 @@ impl App {
                         let diff_for_llm = diff.clone();
                         self.summary.clear();
                         self.summary_loading = true;
-                        tokio::spawn(async move {
-                            let result = client.summarize_diff(&diff_for_llm).await.map_err(|e| e.to_string());
-                            let _ = tx.send(result).await;
-                        });
+                        // If we have a cached summary for this exact PR, show it immediately
+                        // and skip the network call; the cache is already fresh.
+                        if let Some(number) = self.diff_pr_number {
+                            if let Some(cached) = load_pr_cache(&self.diff_repo, number) {
+                                self.summary = cached.summary.clone();
+                                self.summary_loading = false;
+                            } else {
+                                let repo_ctx = load_repo_context(&self.diff_repo, number);
+                                tokio::spawn(async move {
+                                    let result = client.summarize_diff(&diff_for_llm, repo_ctx).await.map_err(|e| e.to_string());
+                                    let _ = tx.send(result).await;
+                                });
+                            }
+                        } else {
+                            tokio::spawn(async move {
+                                let result = client.summarize_diff(&diff_for_llm, None).await.map_err(|e| e.to_string());
+                                let _ = tx.send(result).await;
+                            });
+                        }
                     }
                     self.diff_lines = diff.lines().map(String::from).collect();
                 }
@@ -361,7 +377,12 @@ impl App {
         while let Ok(result) = self.summary_rx.try_recv() {
             self.summary_loading = false;
             match result {
-                Ok(text) => self.summary = text,
+                Ok(text) => {
+                    if let Some(number) = self.diff_pr_number {
+                        save_pr_cache(&self.diff_repo, number, &text);
+                    }
+                    self.summary = text;
+                }
                 Err(e) => self.summary = format!("error: {}", e),
             }
         }

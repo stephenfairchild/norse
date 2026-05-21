@@ -64,10 +64,13 @@ impl LlmClient {
         &self.model
     }
 
-    pub async fn summarize_diff(&self, diff: &str) -> Result<String> {
+    pub async fn summarize_diff(&self, diff: &str, repo_context: Option<String>) -> Result<String> {
         let content = if diff.len() > 8000 { &diff[..8000] } else { diff };
+        let context_block = repo_context
+            .map(|c| format!("{}\n\n---\n\n", c))
+            .unwrap_or_default();
         let prompt = format!(
-            r#"Summarize this git diff. Output exactly two sections, no other text:
+            r#"{context_block}Summarize this git diff. Output exactly two sections, no other text:
 
 ## Summary
 2-4 bullet points, high-level only.
@@ -84,8 +87,7 @@ One sentence describing what the new thing does, followed by a minimal code exam
 - No clear new usage surface → omit the code block and write "No direct usage change."
 
 Diff:
-{}"#,
-            content
+{content}"#,
         );
 
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
