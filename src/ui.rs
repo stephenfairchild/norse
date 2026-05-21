@@ -440,9 +440,9 @@ fn draw_diff(f: &mut Frame, app: &App) {
         (ORANGE, Span::styled("", Style::default()))
     };
     let hint = if approved {
-        " j/k line  ctrl-d/u page  ctrl-x open  q back "
+        " j/k  ctrl-d/u  ctrl-x open  R comment  q back "
     } else {
-        " j/k line  ctrl-d/u page  ctrl-x open  ctrl-a approve  q back "
+        " j/k  ctrl-d/u  ctrl-x open  ctrl-a approve  R comment  q back "
     };
     let diff_block = Block::default()
         .borders(Borders::ALL)
@@ -561,6 +561,32 @@ fn draw_diff(f: &mut Frame, app: &App) {
             Span::styled("█", Style::default().fg(ORANGE)),
         ])).block(prompt_block);
         f.render_widget(input, right_chunks[2]);
+    }
+
+    if app.diff_comment_active {
+        let popup = centered_rect(60, 30, area);
+        f.render_widget(Clear, popup);
+
+        let (border_col, cursor, hint) = if app.diff_comment_submitted {
+            (GRAY, "", " posting… ")
+        } else {
+            (YELLOW, "█", " enter post  ·  esc cancel ")
+        };
+
+        let text = format!("{}{}", app.diff_comment_input, cursor);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_col))
+            .title(Span::styled(" PR Comment ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
+            .title_bottom(Span::styled(hint, Style::default().fg(GRAY)))
+            .style(Style::default().bg(BG));
+        f.render_widget(
+            Paragraph::new(text.as_str())
+                .block(block)
+                .style(Style::default().fg(FG))
+                .wrap(Wrap { trim: false }),
+            popup,
+        );
     }
 }
 

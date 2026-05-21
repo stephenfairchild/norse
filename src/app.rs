@@ -144,6 +144,11 @@ pub struct App {
     pub diff_approval_loading: bool,
     approval_tx: mpsc::Sender<Result<(String, u32, bool), String>>,
     approval_rx: mpsc::Receiver<Result<(String, u32, bool), String>>,
+    pub diff_comment_active: bool,
+    pub diff_comment_input: String,
+    pub diff_comment_submitted: bool,
+    comment_tx: mpsc::Sender<Result<(), String>>,
+    comment_rx: mpsc::Receiver<Result<(), String>>,
 }
 
 impl App {
@@ -171,6 +176,7 @@ impl App {
         let (news_tx, news_rx) = mpsc::channel(4);
         let (user_tx, user_rx) = mpsc::channel(2);
         let (approval_tx, approval_rx) = mpsc::channel(4);
+        let (comment_tx, comment_rx) = mpsc::channel(4);
         if let Some(ref gh) = github {
             let client = Arc::clone(gh);
             let tx = watch_tx.clone();
@@ -249,6 +255,11 @@ impl App {
             diff_approval_loading: false,
             approval_tx,
             approval_rx,
+            diff_comment_active: false,
+            diff_comment_input: String::new(),
+            diff_comment_submitted: false,
+            comment_tx,
+            comment_rx,
             github,
             llm,
             debounce: None,
@@ -416,6 +427,12 @@ impl App {
                     self.approved_prs.insert(key);
                 }
             }
+        }
+
+        while let Ok(_result) = self.comment_rx.try_recv() {
+            self.diff_comment_submitted = false;
+            self.diff_comment_active = false;
+            self.diff_comment_input.clear();
         }
 
         while let Ok(result) = self.repo_answer_rx.try_recv() {
@@ -1135,6 +1152,20 @@ impl App {
     }
 
     fn handle_diff(&mut self, key: KeyEvent) {
+        if self.diff_comment_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.diff_comment_active = false;
+                    self.diff_comment_input.clear();
+                }
+                KeyCode::Enter => self.fire_pr_comment(),
+                KeyCode::Backspace => { self.diff_comment_input.pop(); }
+                KeyCode::Char(c) => self.diff_comment_input.push(c),
+                _ => {}
+            }
+            return;
+        }
+
         if self.diff_prompt_active {
             match key.code {
                 KeyCode::Esc => {
@@ -1201,8 +1232,26 @@ impl App {
                 self.diff_prompt_active = true;
                 self.diff_prompt_input.clear();
             }
+            (_, KeyCode::Char('R')) if self.diff_pr_number.is_some() => {
+                self.diff_comment_active = true;
+                self.diff_comment_input.clear();
+            }
             _ => {}
         }
+    }
+
+    fn fire_pr_comment(&mut self) {
+        let body = self.diff_comment_input.trim().to_string();
+        if body.is_empty() { return; }
+        let Some(number) = self.diff_pr_number else { return; };
+        let Some(client) = self.github.clone() else { return; };
+        let repo = self.diff_repo.clone();
+        let tx = self.comment_tx.clone();
+        self.diff_comment_submitted = true;
+        tokio::spawn(async move {
+            let result = client.comment_on_pr(&repo, number, &body).await.map_err(|e| e.to_string());
+            let _ = tx.send(result).await;
+        });
     }
 
     fn fire_repo_question(&mut self) {

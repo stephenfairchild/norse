@@ -413,6 +413,17 @@ impl GithubClient {
         Ok(reviews.iter().any(|r| r.user.login == username && r.state == "APPROVED"))
     }
 
+    pub async fn comment_on_pr(&self, repo: &str, number: u32, body: &str) -> Result<()> {
+        self.client
+            .post(format!("{}/repos/{}/issues/{}/comments", self.base_url, repo, number))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&serde_json::json!({"body": body}))
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
     pub async fn approve_pr(&self, repo: &str, number: u32) -> Result<()> {
         self.client
             .post(format!("{}/repos/{}/pulls/{}/reviews", self.base_url, repo, number))
