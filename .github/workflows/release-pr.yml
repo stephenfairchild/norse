@@ -1,0 +1,58 @@
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this is a release commit
+        id: guard
+        run: |
+          MSG=$(git log -1 --format="%s")
+          if echo "$MSG" | grep -qE '^chore: release v'; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install cocogitto
+        if: steps.guard.outputs.skip != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cocogitto
+
+      - name: Compute next version
+        if: steps.guard.outputs.skip != 'true'
+        id: next
+        run: |
+          VERSION=$(cog bump --auto --dry-run 2>/dev/null || true)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml and changelog
+        if: steps.guard.outputs.skip != 'true' && steps.next.outputs.version != ''
+        run: |
+          VERSION=${{ steps.next.outputs.version }}
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          cargo update --workspace
+          cog changelog > CHANGELOG.md
+
+      - name: Create or update release PR
+        if: steps.guard.outputs.skip != 'true' && steps.next.outputs.version != ''
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/release
+          title: "chore: release v${{ steps.next.outputs.version }}"
+          body-path: CHANGELOG.md
+          commit-message: "chore: release v${{ steps.next.outputs.version }}"
+          labels: release

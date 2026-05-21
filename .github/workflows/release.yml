@@ -1,29 +1,30 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - v[0-9]+.[0-9]+.[0-9]+
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'chore/release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Generate changelog
-        uses: oknozor/cocogitto-action@v3
-        with:
-          git-user: "github-actions[bot]"
-          git-user-email: "github-actions[bot]@users.noreply.github.com"
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | grep -oP '[\d.]+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: GITHUB_CHANGELOG.md
-          generate_release_notes: false
+      - name: Create GitHub release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v${{ steps.version.outputs.version }} \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes-file CHANGELOG.md

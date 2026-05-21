@@ -4,12 +4,3 @@ template = "full_hash"
 authors = [
   { signature = "Stephen Fairchild", username = "stephenfairchild" },
 ]
-
-[bump]
-pre_bump_hooks = [
-  "cargo build --release",
-]
-post_bump_hooks = [
-  "git push",
-  "git push origin v{{version}}",
-]
