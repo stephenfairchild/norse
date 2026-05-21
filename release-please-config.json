@@ -1,6 +1,5 @@
 {
   "release-type": "rust",
-  "pull-request-header": "Release candidate — review changelog before merging.",
-  "bootstrap-sha": "8f91c9b03726188744983f1983a294789ce42d72"
+  "pull-request-header": "Release candidate — review changelog before merging."
 }
 
