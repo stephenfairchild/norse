@@ -386,6 +386,33 @@ impl GithubClient {
         Ok(())
     }
 
+    pub async fn get_current_user(&self) -> Result<String> {
+        #[derive(Deserialize)]
+        struct User { login: String }
+        let user: User = self.client
+            .get(format!("{}/user", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send().await?.error_for_status()?.json().await?;
+        Ok(user.login)
+    }
+
+    pub async fn is_pr_approved_by(&self, repo: &str, number: u32, username: &str) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct Review { user: ReviewUser, state: String }
+        #[derive(Deserialize)]
+        struct ReviewUser { login: String }
+        let reviews: Vec<Review> = self.client
+            .get(format!("{}/repos/{}/pulls/{}/reviews", self.base_url, repo, number))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .query(&[("per_page", "100")])
+            .send().await?.error_for_status()?.json().await?;
+        Ok(reviews.iter().any(|r| r.user.login == username && r.state == "APPROVED"))
+    }
+
     pub async fn approve_pr(&self, repo: &str, number: u32) -> Result<()> {
         self.client
             .post(format!("{}/repos/{}/pulls/{}/reviews", self.base_url, repo, number))

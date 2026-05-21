@@ -139,6 +139,11 @@ pub struct App {
     watch_rx: mpsc::Receiver<Result<HashSet<String>, String>>,
     news_tx: mpsc::Sender<Result<String, String>>,
     news_rx: mpsc::Receiver<Result<String, String>>,
+    current_user: Option<String>,
+    user_rx: mpsc::Receiver<Result<String, String>>,
+    pub diff_approval_loading: bool,
+    approval_tx: mpsc::Sender<Result<(String, u32, bool), String>>,
+    approval_rx: mpsc::Receiver<Result<(String, u32, bool), String>>,
 }
 
 impl App {
@@ -164,12 +169,19 @@ impl App {
         let (pr_closed_tx, pr_closed_rx) = mpsc::channel(4);
         let (watch_tx, watch_rx) = mpsc::channel(4);
         let (news_tx, news_rx) = mpsc::channel(4);
+        let (user_tx, user_rx) = mpsc::channel(2);
+        let (approval_tx, approval_rx) = mpsc::channel(4);
         if let Some(ref gh) = github {
             let client = Arc::clone(gh);
             let tx = watch_tx.clone();
             tokio::spawn(async move {
                 let result = client.fetch_watched_repos().await.map_err(|e| e.to_string());
                 let _ = tx.send(result).await;
+            });
+            let client = Arc::clone(gh);
+            tokio::spawn(async move {
+                let result = client.get_current_user().await.map_err(|e| e.to_string());
+                let _ = user_tx.send(result).await;
             });
         }
         Self {
@@ -232,6 +244,11 @@ impl App {
             model_list,
             model_selected: 0,
             active_model,
+            current_user: None,
+            user_rx,
+            diff_approval_loading: false,
+            approval_tx,
+            approval_rx,
             github,
             llm,
             debounce: None,
@@ -381,6 +398,23 @@ impl App {
             match result {
                 Ok(content) => self.news_content = content,
                 Err(e) => self.news_error = Some(e),
+            }
+        }
+
+        while let Ok(result) = self.user_rx.try_recv() {
+            if let Ok(login) = result {
+                self.current_user = Some(login);
+            }
+        }
+
+        while let Ok(result) = self.approval_rx.try_recv() {
+            self.diff_approval_loading = false;
+            if let Ok((repo, number, approved)) = result {
+                let key = format!("{}#{}", repo, number);
+                if approved && !self.approved_prs.contains(&key) {
+                    persist_approved_pr(&key);
+                    self.approved_prs.insert(key);
+                }
             }
         }
 
@@ -833,6 +867,20 @@ impl App {
         self.diff_answer_loading = false;
         self.mode = Mode::Diff;
 
+        // Check GitHub for the live approval state (catches approvals made outside norse).
+        if let (Some(client), Some(ref username)) = (self.github.clone(), self.current_user.clone()) {
+            let tx = self.approval_tx.clone();
+            let check_repo = repo.clone();
+            let username = username.clone();
+            self.diff_approval_loading = true;
+            tokio::spawn(async move {
+                let result = client.is_pr_approved_by(&check_repo, number, &username).await
+                    .map(|approved| (check_repo, number, approved))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(result).await;
+            });
+        }
+
         let Some(client) = self.github.clone() else {
             self.diff_loading = false;
             self.diff_lines = vec!["no github client configured".into()];
@@ -861,6 +909,7 @@ impl App {
         self.diff_url = None;
         self.diff_pr_number = None;
         self.diff_jira = None;
+        self.diff_approval_loading = false;
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;

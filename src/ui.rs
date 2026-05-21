@@ -495,6 +495,8 @@ fn draw_diff(f: &mut Frame, app: &App) {
         spans.push(Span::styled("  ·  ", Style::default().fg(GRAY).bg(BG1)));
         if approved {
             spans.push(Span::styled("✓ approved", Style::default().fg(GREEN).bg(BG1).add_modifier(Modifier::BOLD)));
+        } else if app.diff_approval_loading {
+            spans.push(Span::styled("checking…", Style::default().fg(GRAY).bg(BG1)));
         } else {
             spans.push(Span::styled("not approved", Style::default().fg(GRAY).bg(BG1)));
         }
