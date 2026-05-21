@@ -433,11 +433,23 @@ fn draw_diff(f: &mut Frame, app: &App) {
 
     // Left: diff — render block and paragraph separately so the paragraph is
     // given the exact inner rect and long lines are clipped at the border.
+    let approved = app.current_diff_approved();
+    let (border_color, approved_badge) = if approved {
+        (GREEN, Span::styled(" ✓ APPROVED ", Style::default().fg(BG).bg(GREEN).add_modifier(Modifier::BOLD)))
+    } else {
+        (ORANGE, Span::styled("", Style::default()))
+    };
+    let hint = if approved {
+        " j/k line  ctrl-d/u page  ctrl-x open  q back "
+    } else {
+        " j/k line  ctrl-d/u page  ctrl-x open  ctrl-a approve  q back "
+    };
     let diff_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ORANGE))
+        .border_style(Style::default().fg(border_color))
         .title(Span::styled(format!(" {} ", app.diff_header), Style::default().fg(YELLOW)))
-        .title_bottom(Span::styled(" j/k line  ctrl-d/u page  ctrl-x open  ctrl-a approve  q back ", Style::default().fg(GRAY)))
+        .title(approved_badge)
+        .title_bottom(Span::styled(hint, Style::default().fg(GRAY)))
         .style(Style::default().bg(BG));
 
     let diff_inner = diff_block.inner(cols[0]);

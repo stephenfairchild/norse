@@ -152,6 +152,7 @@ impl App {
         };
         let active_model = load_saved_model();
         let llm = LlmClient::from_claude_settings(active_model.clone()).ok().map(Arc::new);
+        let approved_prs = load_approved_prs();
         let (diff_tx, diff_rx) = mpsc::channel(4);
         let (summary_tx, summary_rx) = mpsc::channel(4);
         let (answer_tx, answer_rx) = mpsc::channel(4);
@@ -188,7 +189,7 @@ impl App {
             diff_sha: String::new(),
             diff_url: None,
             diff_pr_number: None,
-            approved_prs: HashSet::new(),
+            approved_prs,
             summary: String::new(),
             summary_loading: false,
             diff_prompt_active: false,
@@ -258,6 +259,14 @@ impl App {
 
     pub fn llm_model(&self) -> Option<&str> {
         self.llm.as_ref().map(|c| c.active_model())
+    }
+
+    pub fn current_diff_approved(&self) -> bool {
+        if let Some(number) = self.diff_pr_number {
+            self.approved_prs.contains(&format!("{}#{}", self.diff_repo, number))
+        } else {
+            false
+        }
     }
 
     pub fn poll(&mut self) {
@@ -1125,6 +1134,7 @@ impl App {
                     let repo = self.diff_repo.clone();
                     let key = format!("{}#{}", repo, number);
                     if !self.approved_prs.contains(&key) {
+                        persist_approved_pr(&key);
                         self.approved_prs.insert(key);
                         if let Some(client) = self.github.clone() {
                             tokio::spawn(async move { let _ = client.approve_pr(&repo, number).await; });
@@ -1274,6 +1284,28 @@ fn save_model(model: &str) {
         let dir = format!("{}/.norsedata", home);
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(format!("{}/model", dir), model);
+    }
+}
+
+fn load_approved_prs() -> HashSet<String> {
+    let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return HashSet::new() };
+    let text = match std::fs::read_to_string(format!("{}/.norsedata/prs-approved", home)) {
+        Ok(t) => t,
+        Err(_) => return HashSet::new(),
+    };
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+fn persist_approved_pr(key: &str) {
+    if let Ok(home) = std::env::var("HOME") {
+        let dir = format!("{}/.norsedata", home);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{}/prs-approved", dir);
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path);
+        if let Ok(ref mut f) = file {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", key);
+        }
     }
 }
 
