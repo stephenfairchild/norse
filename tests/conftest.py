@@ -36,6 +36,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 class _Handler(BaseHTTPRequestHandler):
     base_url: str = ""  # set after server binds
+    _approve_calls: list = []  # paths of POST .../reviews requests received
 
     def log_message(self, *_):
         pass  # silence access log
@@ -103,11 +104,29 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._respond(404, b'{"message":"Not Found"}')
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)  # consume body
+        if re.match(r"^/repos/[^/]+/[^/]+/pulls/\d+/reviews$", path):
+            _Handler._approve_calls.append(path)
+            self._respond(200, b'{"id": 1, "state": "APPROVED"}')
+        else:
+            self._respond(404, b'{"message":"Not Found"}')
+
     def do_PUT(self):
         self._respond(200, b'{}')
 
     def do_DELETE(self):
         self._respond(204, b'')
+
+
+@pytest.fixture
+def approve_calls():
+    """Yields the list of approve API paths called; cleared before each test."""
+    _Handler._approve_calls.clear()
+    yield _Handler._approve_calls
 
 
 @pytest.fixture(scope="session")

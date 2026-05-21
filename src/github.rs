@@ -2,6 +2,7 @@ use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 struct RepoSearchResponse {
@@ -13,10 +14,6 @@ struct RepoItem {
     full_name: String,
 }
 
-#[derive(Deserialize)]
-struct WatchedRepo {
-    full_name: String,
-}
 
 #[derive(Deserialize)]
 struct PullRequest {
@@ -35,8 +32,33 @@ struct PrSearchItem {
     user: PrUser,
     repository_url: String,
     created_at: String,
+    state: String,
     draft: Option<bool>,
     html_url: String,
+    body: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct PrSummary {
+    pub number: u32,
+    pub title: String,
+    pub author: String,
+    pub state: String,
+    pub html_url: String,
+    pub jira: Option<String>,
+    pub body: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct RepoActivity {
+    pub repo: String,
+    pub is_watched: bool,
+    pub prs: Vec<PrSummary>,
+}
+
+#[derive(Deserialize)]
+struct WatchedRepo {
+    full_name: String,
 }
 
 #[derive(Deserialize)]
@@ -323,26 +345,20 @@ impl GithubClient {
             .collect())
     }
 
+
     pub async fn fetch_watched_repos(&self) -> Result<HashSet<String>> {
         let mut page = 1u32;
         let mut all = HashSet::new();
         loop {
-            let repos: Vec<WatchedRepo> = self
-                .client
+            let repos: Vec<WatchedRepo> = self.client
                 .get(format!("{}/user/subscriptions", self.base_url))
                 .header("Authorization", format!("Bearer {}", self.token))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .query(&[("per_page", "100"), ("page", &page.to_string())])
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+                .send().await?.error_for_status()?.json().await?;
             let done = repos.len() < 100;
-            for r in repos {
-                all.insert(r.full_name);
-            }
+            for r in repos { all.insert(r.full_name); }
             if done { break; }
             page += 1;
         }
@@ -356,9 +372,7 @@ impl GithubClient {
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&serde_json::json!({"subscribed": true, "ignored": false}))
-            .send()
-            .await?
-            .error_for_status()?;
+            .send().await?.error_for_status()?;
         Ok(())
     }
 
@@ -368,9 +382,197 @@ impl GithubClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await?
-            .error_for_status()?;
+            .send().await?.error_for_status()?;
         Ok(())
     }
+
+    pub async fn approve_pr(&self, repo: &str, number: u32) -> Result<()> {
+        self.client
+            .post(format!("{}/repos/{}/pulls/{}/reviews", self.base_url, repo, number))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&serde_json::json!({"event": "APPROVE"}))
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn fetch_news_activity(&self) -> Result<Vec<RepoActivity>> {
+        let since_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(86400);
+        let since_date = secs_to_date(since_secs);
+
+        let watched_repos = self.fetch_watched_repos().await.unwrap_or_default();
+        let watched_set: HashSet<&str> = watched_repos.iter().map(|s| s.as_str()).collect();
+        let targets: Vec<String> = watched_repos.iter()
+            .filter(|r| self.orgs.iter().any(|org| r.starts_with(&format!("{}/", org))))
+            .cloned()
+            .collect();
+
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pr_pairs = self.search_repo_news(&targets, &since_date).await?;
+
+        let mut repo_map: HashMap<String, Vec<PrSummary>> = HashMap::new();
+        for (repo, pr) in pr_pairs {
+            repo_map.entry(repo).or_default().push(pr);
+        }
+
+        let mut activities: Vec<RepoActivity> = repo_map.into_iter()
+            .map(|(repo, prs)| {
+                let is_watched = watched_set.contains(repo.as_str());
+                RepoActivity { is_watched, repo, prs }
+            })
+            .collect();
+
+        activities.sort_by(|a, b| {
+            b.is_watched.cmp(&a.is_watched)
+                .then_with(|| b.prs.len().cmp(&a.prs.len()))
+        });
+        Ok(activities)
+    }
+
+    pub async fn fetch_recently_closed_prs(&self) -> Result<Vec<PrItem>> {
+        let since_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(86400);
+        let since_date = secs_to_date(since_secs);
+
+        let watched = self.fetch_watched_repos().await?;
+        let targets: Vec<String> = watched.into_iter()
+            .filter(|r| self.orgs.iter().any(|org| r.starts_with(&format!("{}/", org))))
+            .collect();
+
+        if targets.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No watched repos in configured orgs. Press 'w' on a repo in the picker to watch it."
+            ));
+        }
+
+        let repos_prefix = format!("{}/repos/", self.base_url);
+        let mut all: Vec<PrItem> = Vec::new();
+        for chunk in targets.chunks(10) {
+            let repo_quals = chunk.iter().map(|r| format!("repo:{}", r)).collect::<Vec<_>>().join(" ");
+
+            let q = format!("is:pr is:merged {} merged:>{}", repo_quals, since_date);
+            let resp: PrSearchResponse = self.client
+                .get(format!("{}/search/issues", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .query(&[("q", q.as_str()), ("sort", "updated"), ("per_page", "100")])
+                .send().await?.error_for_status()?.json().await?;
+            for i in resp.items {
+                let repo = i.repository_url.strip_prefix(&repos_prefix)
+                    .unwrap_or(&i.repository_url).to_string();
+                all.push(PrItem {
+                    number: i.number,
+                    title: i.title,
+                    author: i.user.login,
+                    repo,
+                    created_at: i.created_at,
+                    draft: i.draft.unwrap_or(false),
+                    html_url: i.html_url,
+                });
+            }
+        }
+
+        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(all)
+    }
+
+
+    // Fetch all recent PRs within the given repos (chunks of 10 to stay
+    // under GitHub's query length limits with longer org/repo names).
+    async fn search_repo_news(&self, repos: &[String], since_date: &str) -> Result<Vec<(String, PrSummary)>> {
+        let repos_prefix = format!("{}/repos/", self.base_url);
+        let mut all = Vec::new();
+        for chunk in repos.chunks(10) {
+            let repo_quals = chunk.iter().map(|r| format!("repo:{}", r)).collect::<Vec<_>>().join(" ");
+            let q = format!("is:pr {} updated:>{}", repo_quals, since_date);
+            let resp: PrSearchResponse = self.client
+                .get(format!("{}/search/issues", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .query(&[("q", q.as_str()), ("sort", "updated"), ("per_page", "100")])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            for i in resp.items {
+                let repo = i.repository_url
+                    .strip_prefix(&repos_prefix)
+                    .unwrap_or(&i.repository_url)
+                    .to_string();
+                let jira = extract_jira(&i.title)
+                    .or_else(|| i.body.as_deref().and_then(|b| extract_jira(b)));
+                let body = i.body.map(|b| {
+                    let b = b.trim().to_string();
+                    if b.len() > 600 { format!("{}…", &b[..600]) } else { b }
+                }).filter(|b| !b.is_empty());
+                all.push((repo, PrSummary {
+                    number: i.number,
+                    title: i.title,
+                    author: i.user.login,
+                    state: i.state,
+                    html_url: i.html_url,
+                    jira,
+                    body,
+                }));
+            }
+        }
+        Ok(all)
+    }
 }
+
+fn extract_jira(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_uppercase() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_uppercase() { i += 1; }
+            let prefix_len = i - start;
+            if prefix_len >= 2 && i < b.len() && b[i] == b'-' {
+                i += 1;
+                let num_start = i;
+                while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+                if i > num_start {
+                    return Some(text[start..i].to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn secs_to_date(secs: u64) -> String {
+    let mut rem = secs / 86400;
+    let mut year = 1970u64;
+    loop {
+        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
+        if rem < dy { break; }
+        rem -= dy;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let dims = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u64;
+    for d in &dims {
+        if rem < *d { break; }
+        rem -= *d;
+        month += 1;
+    }
+    format!("{:04}-{:02}-{:02}", year, month, rem + 1)
+}
+

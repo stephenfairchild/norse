@@ -7,14 +7,14 @@ and the header format.
 
 Note: the diff view takes over the full terminal; there is no shared status
 bar showing "DIFF".  Presence in the diff view is detected by the bottom
-hint "ctrl-x open PR" rendered inside the diff block border.
+hint "ctrl-a approve" rendered inside the diff block border.
 """
 
 import pytest
 from conftest import assert_screen, screen, send_key, wait_for
 
 # Unique text rendered only when the diff block is on screen
-_DIFF_SENTINEL = "ctrl-x open PR"
+_DIFF_SENTINEL = "ctrl-a approve"
 
 
 @pytest.fixture
@@ -100,7 +100,10 @@ class TestDiffBackNavigation:
 
 class TestDiffKeybindingHints:
     def test_statusbar_shows_ctrl_x_hint(self, diff_view):
-        assert_screen(diff_view, "ctrl-x")
+        assert_screen(diff_view, "ctrl-x open")
+
+    def test_statusbar_shows_ctrl_a_hint(self, diff_view):
+        assert_screen(diff_view, "ctrl-a approve")
 
     def test_statusbar_shows_navigation_hint(self, diff_view):
         s = screen(diff_view)

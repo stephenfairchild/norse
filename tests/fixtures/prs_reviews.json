@@ -6,6 +6,7 @@
       "user": {"login": "carol"},
       "repository_url": "BASE_URL/repos/test-org/alpha-repo",
       "created_at": "2026-05-16T08:00:00Z",
+      "state": "open",
       "draft": false,
       "html_url": "https://github.com/test-org/alpha-repo/pull/99"
     }
