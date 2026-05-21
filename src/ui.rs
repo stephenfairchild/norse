@@ -466,17 +466,32 @@ fn draw_diff(f: &mut Frame, app: &App) {
         diff_inner,
     );
 
-    // Right: status bar + AI summary / answer + optional prompt input
+    // Right: status bar + AI summary + comments + optional prompt input
+    let has_comments = app.diff_pr_comments_loading || !app.diff_pr_comments.is_empty();
+    let comments_h = if has_comments {
+        (app.diff_pr_comments.len().max(1) as u16 + 2).min(10)
+    } else {
+        0
+    };
     let right_chunks = if app.diff_prompt_active {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(4),
+                Constraint::Length(comments_h),
+                Constraint::Length(3),
+            ])
             .split(cols[1])
             .to_vec()
     } else {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(4),
+                Constraint::Length(comments_h),
+            ])
             .split(cols[1])
             .to_vec()
     };
@@ -550,6 +565,34 @@ fn draw_diff(f: &mut Frame, app: &App) {
         );
     }
 
+    // Comments panel
+    if has_comments {
+        let items: Vec<ListItem> = if app.diff_pr_comments_loading {
+            vec![ListItem::new(Span::styled(" loading comments…", Style::default().fg(GRAY)))]
+        } else {
+            app.diff_pr_comments.iter().map(|c| {
+                let ago = time_ago(&c.created_at);
+                let max_body = 42usize;
+                let body = if c.body.len() > max_body {
+                    format!("{}…", &c.body[..c.body.floor_char_boundary(max_body)])
+                } else {
+                    c.body.clone()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<14}", trunc(&c.author, 14)), Style::default().fg(YELLOW)),
+                    Span::styled(body, Style::default().fg(FG)),
+                    Span::styled(format!("  {}", ago), Style::default().fg(GRAY)),
+                ]))
+            }).collect()
+        };
+        let comments_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BG2))
+            .title(Span::styled(" Comments ", Style::default().fg(GRAY)))
+            .style(Style::default().bg(BG));
+        f.render_widget(List::new(items).block(comments_block), right_chunks[2]);
+    }
+
     if app.diff_prompt_active {
         let prompt_block = Block::default()
             .borders(Borders::ALL)
@@ -560,7 +603,7 @@ fn draw_diff(f: &mut Frame, app: &App) {
             Span::styled(app.diff_prompt_input.as_str(), Style::default().fg(FG)),
             Span::styled("█", Style::default().fg(ORANGE)),
         ])).block(prompt_block);
-        f.render_widget(input, right_chunks[2]);
+        f.render_widget(input, right_chunks[3]);
     }
 
     if app.diff_comment_active {

@@ -77,6 +77,13 @@ pub struct PrItem {
     pub html_url: String,
 }
 
+#[derive(Clone)]
+pub struct PrComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+}
+
 #[derive(Deserialize)]
 struct ApiCommit {
     sha: String,
@@ -411,6 +418,25 @@ impl GithubClient {
             .query(&[("per_page", "100")])
             .send().await?.error_for_status()?.json().await?;
         Ok(reviews.iter().any(|r| r.user.login == username && r.state == "APPROVED"))
+    }
+
+    pub async fn get_pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>> {
+        #[derive(Deserialize)]
+        struct Comment { user: CommentUser, body: String, created_at: String }
+        #[derive(Deserialize)]
+        struct CommentUser { login: String }
+        let comments: Vec<Comment> = self.client
+            .get(format!("{}/repos/{}/issues/{}/comments", self.base_url, repo, number))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .query(&[("per_page", "30")])
+            .send().await?.error_for_status()?.json().await?;
+        Ok(comments.into_iter().map(|c| PrComment {
+            author: c.user.login,
+            body: c.body.lines().next().unwrap_or("").trim().to_string(),
+            created_at: c.created_at,
+        }).collect())
     }
 
     pub async fn comment_on_pr(&self, repo: &str, number: u32, body: &str) -> Result<()> {

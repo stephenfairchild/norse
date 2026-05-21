@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use crate::config::Config;
-use crate::github::{extract_jira, GithubClient, PrItem, RepoActivity, RepoPreview};
+use crate::github::{extract_jira, GithubClient, PrComment, PrItem, RepoActivity, RepoPreview};
 use crate::llm::LlmClient;
 use crate::search::{SearchResult, SearchState};
 
@@ -149,6 +149,10 @@ pub struct App {
     pub diff_comment_submitted: bool,
     comment_tx: mpsc::Sender<Result<(), String>>,
     comment_rx: mpsc::Receiver<Result<(), String>>,
+    pub diff_pr_comments: Vec<PrComment>,
+    pub diff_pr_comments_loading: bool,
+    pr_comments_tx: mpsc::Sender<Result<Vec<PrComment>, String>>,
+    pr_comments_rx: mpsc::Receiver<Result<Vec<PrComment>, String>>,
 }
 
 impl App {
@@ -177,6 +181,7 @@ impl App {
         let (user_tx, user_rx) = mpsc::channel(2);
         let (approval_tx, approval_rx) = mpsc::channel(4);
         let (comment_tx, comment_rx) = mpsc::channel(4);
+        let (pr_comments_tx, pr_comments_rx) = mpsc::channel(4);
         if let Some(ref gh) = github {
             let client = Arc::clone(gh);
             let tx = watch_tx.clone();
@@ -260,6 +265,10 @@ impl App {
             diff_comment_submitted: false,
             comment_tx,
             comment_rx,
+            diff_pr_comments: Vec::new(),
+            diff_pr_comments_loading: false,
+            pr_comments_tx,
+            pr_comments_rx,
             github,
             llm,
             debounce: None,
@@ -433,6 +442,13 @@ impl App {
             self.diff_comment_submitted = false;
             self.diff_comment_active = false;
             self.diff_comment_input.clear();
+        }
+
+        while let Ok(result) = self.pr_comments_rx.try_recv() {
+            self.diff_pr_comments_loading = false;
+            if let Ok(comments) = result {
+                self.diff_pr_comments = comments;
+            }
         }
 
         while let Ok(result) = self.repo_answer_rx.try_recv() {
@@ -884,6 +900,18 @@ impl App {
         self.diff_answer_loading = false;
         self.mode = Mode::Diff;
 
+        // Fetch PR comments.
+        self.diff_pr_comments.clear();
+        if let Some(client) = self.github.clone() {
+            let tx = self.pr_comments_tx.clone();
+            let fetch_repo = repo.clone();
+            self.diff_pr_comments_loading = true;
+            tokio::spawn(async move {
+                let result = client.get_pr_comments(&fetch_repo, number).await.map_err(|e| e.to_string());
+                let _ = tx.send(result).await;
+            });
+        }
+
         // Check GitHub for the live approval state (catches approvals made outside norse).
         if let (Some(client), Some(ref username)) = (self.github.clone(), self.current_user.clone()) {
             let tx = self.approval_tx.clone();
@@ -927,6 +955,8 @@ impl App {
         self.diff_pr_number = None;
         self.diff_jira = None;
         self.diff_approval_loading = false;
+        self.diff_pr_comments.clear();
+        self.diff_pr_comments_loading = false;
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;
