@@ -18,6 +18,7 @@ pub enum Mode {
 pub enum Focus {
     Results,
     Preview,
+    Answer,
 }
 
 pub enum PrTab {
@@ -55,6 +56,7 @@ pub struct App {
     pub needs_clear: bool,
     pub orgs: Vec<String>,
     pub search: SearchState,
+    pub collected_repos: Vec<String>,
     pub focus: Focus,
     pub picker_insert: bool,
     pub preview_commit_selected: usize,
@@ -64,6 +66,7 @@ pub struct App {
     pub diff_header: String,
     pub diff_repo: String,
     pub diff_sha: String,
+    pub diff_url: Option<String>,
     pub summary: String,
     pub summary_loading: bool,
     pub diff_prompt_active: bool,
@@ -75,6 +78,9 @@ pub struct App {
     pub repo_answer: String,
     pub repo_answer_loading: bool,
     pub repo_progress: Vec<String>,
+    pub repo_answer_scroll: usize,
+    pub repo_conversation: Vec<(String, String)>,
+    pub repo_current_question: String,
     pub pr_tab: PrTab,
     pub pr_items: Vec<PrItem>,
     pub pr_loading: bool,
@@ -145,6 +151,7 @@ impl App {
             needs_clear: false,
             orgs,
             search: SearchState::new(),
+            collected_repos: Vec::new(),
             focus: Focus::Results,
             picker_insert: true,
             preview_commit_selected: 0,
@@ -154,6 +161,7 @@ impl App {
             diff_header: String::new(),
             diff_repo: String::new(),
             diff_sha: String::new(),
+            diff_url: None,
             summary: String::new(),
             summary_loading: false,
             diff_prompt_active: false,
@@ -165,6 +173,9 @@ impl App {
             repo_answer: String::new(),
             repo_answer_loading: false,
             repo_progress: Vec::new(),
+            repo_answer_scroll: 0,
+            repo_conversation: Vec::new(),
+            repo_current_question: String::new(),
             pr_tab: PrTab::All,
             pr_items: Vec::new(),
             pr_loading: false,
@@ -302,10 +313,12 @@ impl App {
 
         while let Ok(result) = self.repo_answer_rx.try_recv() {
             self.repo_answer_loading = false;
-            match result {
-                Ok(text) => self.repo_answer = text,
-                Err(e) => self.repo_answer = format!("error: {}", e),
-            }
+            let text = match result {
+                Ok(text) => text,
+                Err(e) => format!("error: {}", e),
+            };
+            self.repo_conversation.push((self.repo_current_question.clone(), text.clone()));
+            self.repo_answer = text;
         }
 
         if let Some(t) = self.debounce {
@@ -323,14 +336,53 @@ impl App {
         }
     }
 
+    // Returns the combined display list: uncollected search results first, then collected repos.
+    pub fn picker_display(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.search.results.iter()
+            .map(|r| r.repo.as_str())
+            .filter(|r| !self.collected_repos.iter().any(|c| c.as_str() == *r))
+            .collect();
+        for repo in &self.collected_repos {
+            v.push(repo.as_str());
+        }
+        v
+    }
+
+    fn selected_picker_repo(&self) -> Option<String> {
+        let idx = self.search.selected;
+        let uncollected_count = self.search.results.iter()
+            .filter(|r| !self.collected_repos.iter().any(|c| c == &r.repo))
+            .count();
+        if idx < uncollected_count {
+            self.search.results.iter()
+                .filter(|r| !self.collected_repos.iter().any(|c| c == &r.repo))
+                .nth(idx)
+                .map(|r| r.repo.clone())
+        } else {
+            self.collected_repos.get(idx - uncollected_count).cloned()
+        }
+    }
+
+    fn toggle_collect(&mut self) {
+        let Some(repo) = self.selected_picker_repo() else { return; };
+        if let Some(pos) = self.collected_repos.iter().position(|r| r == &repo) {
+            self.collected_repos.remove(pos);
+            let len = self.picker_display().len();
+            if len > 0 && self.search.selected >= len {
+                self.search.selected = len - 1;
+            }
+        } else {
+            self.collected_repos.push(repo);
+        }
+    }
+
     fn on_selection_change(&mut self) {
         self.preview_commit_selected = 0;
-        let Some(result) = self.search.results.get(self.search.selected) else {
+        let Some(repo) = self.selected_picker_repo() else {
             self.search.preview = None;
             self.search.preview_loading = false;
             return;
         };
-        let repo = result.repo.clone();
 
         if let Some(cached) = self.preview_cache.get(&repo) {
             self.search.preview = Some(cached.clone());
@@ -369,11 +421,7 @@ impl App {
     }
 
     fn fire_preview(&mut self) {
-        let Some(result) = self.search.results.get(self.search.selected) else {
-            return;
-        };
-        let repo = result.repo.clone();
-
+        let Some(repo) = self.selected_picker_repo() else { return; };
         let Some(client) = self.github.clone() else { return; };
         let tx = self.search.preview_tx.clone();
         self.search.preview_loading = true;
@@ -457,7 +505,12 @@ impl App {
             (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
                 self.pr_reviews_selected = self.pr_reviews_selected.saturating_sub(1);
             }
-            (_, KeyCode::Enter) | (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_reviews_items.get(self.pr_reviews_selected).cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
                 if let Some(pr) = self.pr_reviews_items.get(self.pr_reviews_selected) {
                     open_in_browser(&pr.html_url.clone());
                 }
@@ -480,7 +533,12 @@ impl App {
             (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
                 self.pr_all_selected = self.pr_all_selected.saturating_sub(1);
             }
-            (_, KeyCode::Enter) | (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_items.get(self.pr_all_selected).cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
                 if let Some(pr) = self.pr_items.get(self.pr_all_selected) {
                     open_in_browser(&pr.html_url.clone());
                 }
@@ -508,7 +566,12 @@ impl App {
                 let len = self.pr_people_filtered().len();
                 if len > 0 { self.pr_people_selected = (self.pr_people_selected + 1).min(len - 1); }
             }
-            (_, KeyCode::Enter) | (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_people_filtered().get(self.pr_people_selected).cloned().cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
                 let filtered = self.pr_people_filtered();
                 if let Some(pr) = filtered.get(self.pr_people_selected) {
                     open_in_browser(&pr.html_url.clone());
@@ -544,7 +607,12 @@ impl App {
                 let len = self.pr_repo_filtered().len();
                 if len > 0 { self.pr_repo_selected = (self.pr_repo_selected + 1).min(len - 1); }
             }
-            (_, KeyCode::Enter) | (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_repo_filtered().get(self.pr_repo_selected).cloned().cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
                 let filtered = self.pr_repo_filtered();
                 if let Some(pr) = filtered.get(self.pr_repo_selected) {
                     open_in_browser(&pr.html_url.clone());
@@ -575,7 +643,12 @@ impl App {
             (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
                 self.pr_watching_selected = self.pr_watching_selected.saturating_sub(1);
             }
-            (_, KeyCode::Enter) | (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_watching_filtered().get(self.pr_watching_selected).cloned().cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
                 let prs = self.pr_watching_filtered();
                 if let Some(pr) = prs.get(self.pr_watching_selected) {
                     open_in_browser(&pr.html_url.clone());
@@ -610,16 +683,50 @@ impl App {
         });
     }
 
+    fn open_pr_diff(&mut self, pr: &PrItem) {
+        let repo = pr.repo.clone();
+        let number = pr.number;
+        self.diff_header = format!("{}  #{} {}", repo, number, pr.title);
+        self.diff_repo = repo.clone();
+        self.diff_sha = String::new();
+        self.diff_url = Some(pr.html_url.clone());
+        self.diff_lines.clear();
+        self.diff_loading = true;
+        self.diff_scroll = 0;
+        self.summary.clear();
+        self.summary_loading = self.llm.is_some();
+        self.diff_prompt_active = false;
+        self.diff_prompt_input.clear();
+        self.diff_answer.clear();
+        self.diff_answer_loading = false;
+        self.mode = Mode::Diff;
+
+        let Some(client) = self.github.clone() else {
+            self.diff_loading = false;
+            self.diff_lines = vec!["no github client configured".into()];
+            return;
+        };
+
+        let tx = self.diff_tx.clone();
+        tokio::spawn(async move {
+            let result = client.get_pr_diff(&repo, number).await.map_err(|e| e.to_string());
+            let _ = tx.send(result).await;
+        });
+    }
+
     fn open_diff(&mut self) {
-        let Some(ref preview) = self.search.preview else { return; };
-        let Some(commit) = preview.commits.get(self.preview_commit_selected) else { return; };
-        let sha = commit.sha.clone();
-        let Some(r) = self.search.results.get(self.search.selected) else { return; };
-        let repo = r.repo.clone();
+        let sha = match self.search.preview.as_ref()
+            .and_then(|p| p.commits.get(self.preview_commit_selected))
+        {
+            Some(c) => c.sha.clone(),
+            None => return,
+        };
+        let Some(repo) = self.selected_picker_repo() else { return; };
 
         self.diff_header = format!("{}  {}", repo, sha);
         self.diff_repo = repo.clone();
         self.diff_sha = sha.clone();
+        self.diff_url = None;
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;
@@ -682,14 +789,24 @@ impl App {
 
     fn handle_picker(&mut self, key: KeyEvent) {
         if self.repo_prompt_active {
-            match key.code {
-                KeyCode::Esc => {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Esc) => {
                     self.repo_prompt_active = false;
                     self.repo_prompt_input.clear();
                 }
-                KeyCode::Enter => self.fire_repo_question(),
-                KeyCode::Backspace => { self.repo_prompt_input.pop(); }
-                KeyCode::Char(c) => self.repo_prompt_input.push(c),
+                (_, KeyCode::Enter) => self.fire_repo_question(),
+                (_, KeyCode::Backspace) => { self.repo_prompt_input.pop(); }
+                (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                    if self.repo_answer_loading || !self.repo_conversation.is_empty() {
+                        self.focus = Focus::Answer;
+                    }
+                }
+                (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                    self.focus = Focus::Results;
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                    self.repo_prompt_input.push(c);
+                }
                 _ => {}
             }
             return;
@@ -697,6 +814,7 @@ impl App {
 
         if key.code == KeyCode::Esc {
             match (&self.focus, self.picker_insert) {
+                (Focus::Answer, _) => self.focus = Focus::Results,
                 (Focus::Preview, _) => self.focus = Focus::Results,
                 (Focus::Results, true) => self.picker_insert = false,
                 (Focus::Results, false) => self.mode = Mode::Normal,
@@ -707,7 +825,9 @@ impl App {
         match &self.focus {
             Focus::Results if self.picker_insert => match (key.modifiers, key.code) {
                 (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
-                    if self.search.preview.as_ref().map(|p| !p.commits.is_empty()).unwrap_or(false) {
+                    if self.repo_answer_loading || !self.repo_conversation.is_empty() {
+                        self.focus = Focus::Answer;
+                    } else if self.search.preview.as_ref().map(|p| !p.commits.is_empty()).unwrap_or(false) {
                         self.focus = Focus::Preview;
                         self.preview_commit_selected = 0;
                     }
@@ -725,30 +845,31 @@ impl App {
             Focus::Results => match (key.modifiers, key.code) {
                 (KeyModifiers::NONE, KeyCode::Char('i')) => self.picker_insert = true,
                 (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
-                    self.search.next();
+                    let len = self.picker_display().len();
+                    if len > 0 { self.search.selected = (self.search.selected + 1).min(len - 1); }
                     self.on_selection_change();
                 }
                 (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
-                    self.search.prev();
+                    self.search.selected = self.search.selected.saturating_sub(1);
                     self.on_selection_change();
                 }
                 (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
-                    if self.search.preview.as_ref().map(|p| !p.commits.is_empty()).unwrap_or(false) {
+                    if self.repo_answer_loading || !self.repo_conversation.is_empty() {
+                        self.focus = Focus::Answer;
+                    } else if self.search.preview.as_ref().map(|p| !p.commits.is_empty()).unwrap_or(false) {
                         self.focus = Focus::Preview;
                         self.preview_commit_selected = 0;
                     }
                 }
                 (KeyModifiers::NONE, KeyCode::Char('/')) => {
-                    if self.search.results.get(self.search.selected).is_some() {
+                    if !self.collected_repos.is_empty() || self.selected_picker_repo().is_some() {
                         self.repo_prompt_active = true;
                         self.repo_prompt_input.clear();
-                        self.repo_answer.clear();
-                        self.repo_answer_loading = false;
                     }
                 }
+                (KeyModifiers::NONE, KeyCode::Char('c')) => self.toggle_collect(),
                 (KeyModifiers::NONE, KeyCode::Char('w')) => {
-                    if let Some(result) = self.search.results.get(self.search.selected) {
-                        let repo = result.repo.clone();
+                    if let Some(repo) = self.selected_picker_repo() {
                         self.toggle_watch(repo);
                     }
                 }
@@ -766,6 +887,22 @@ impl App {
                 }
                 (_, KeyCode::Enter) => self.open_diff(),
                 (KeyModifiers::CONTROL, KeyCode::Char('h')) => self.focus = Focus::Results,
+                _ => {}
+            },
+            Focus::Answer => match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('h')) => self.focus = Focus::Results,
+                (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                    self.repo_answer_scroll = self.repo_answer_scroll.saturating_add(1);
+                }
+                (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                    self.repo_answer_scroll = self.repo_answer_scroll.saturating_sub(1);
+                }
+                (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+                    self.repo_answer_scroll = self.repo_answer_scroll.saturating_add(15);
+                }
+                (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                    self.repo_answer_scroll = self.repo_answer_scroll.saturating_sub(15);
+                }
                 _ => {}
             },
         }
@@ -788,7 +925,7 @@ impl App {
 
         match (key.modifiers, key.code) {
             (_, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
-                self.mode = Mode::Picker;
+                self.mode = if self.diff_url.is_some() { Mode::PrBrowser } else { Mode::Picker };
                 self.needs_clear = true;
             }
             (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
@@ -804,15 +941,19 @@ impl App {
                 self.diff_scroll = self.diff_scroll.saturating_sub(15);
             }
             (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
-                let repo = self.diff_repo.clone();
-                let sha = self.diff_sha.clone();
-                if let Some(ref client) = self.github {
-                    let client = Arc::clone(client);
-                    tokio::spawn(async move {
-                        let url = client.get_pr_url(&repo, &sha).await
-                            .unwrap_or_else(|_| format!("https://github.com/{}/commit/{}", repo, sha));
-                        open_in_browser(&url);
-                    });
+                if let Some(ref url) = self.diff_url {
+                    open_in_browser(url);
+                } else {
+                    let repo = self.diff_repo.clone();
+                    let sha = self.diff_sha.clone();
+                    if let Some(ref client) = self.github {
+                        let client = Arc::clone(client);
+                        tokio::spawn(async move {
+                            let url = client.get_pr_url(&repo, &sha).await
+                                .unwrap_or_else(|_| format!("https://github.com/{}/commit/{}", repo, sha));
+                            open_in_browser(&url);
+                        });
+                    }
                 }
             }
             (KeyModifiers::NONE, KeyCode::Char('/')) => {
@@ -826,21 +967,30 @@ impl App {
     fn fire_repo_question(&mut self) {
         let question = self.repo_prompt_input.trim().to_string();
         if question.is_empty() { return; }
-        let Some(result) = self.search.results.get(self.search.selected) else { return; };
-        let repo = result.repo.clone();
         let Some(ref client) = self.llm else { return; };
         let client = Arc::clone(client);
         let tx = self.repo_answer_tx.clone();
-        self.repo_prompt_active = false;
+        self.repo_current_question = question.clone();
         self.repo_prompt_input.clear();
-        self.repo_answer.clear();
         self.repo_answer_loading = true;
+        self.repo_answer_scroll = 0;
         self.repo_progress.clear();
         let progress_tx = self.repo_progress_tx.clone();
-        tokio::spawn(async move {
-            let result = client.ask_repo(&repo, &question, progress_tx).await.map_err(|e| e.to_string());
-            let _ = tx.send(result).await;
-        });
+        let history = self.repo_conversation.clone();
+
+        if !self.collected_repos.is_empty() {
+            let repos = self.collected_repos.clone();
+            tokio::spawn(async move {
+                let result = client.ask_repos(&repos, &question, &history, progress_tx).await.map_err(|e| e.to_string());
+                let _ = tx.send(result).await;
+            });
+        } else {
+            let Some(repo) = self.selected_picker_repo() else { return; };
+            tokio::spawn(async move {
+                let result = client.ask_repo(&repo, &question, &history, progress_tx).await.map_err(|e| e.to_string());
+                let _ = tx.send(result).await;
+            });
+        }
     }
 
     fn fire_diff_question(&mut self) {

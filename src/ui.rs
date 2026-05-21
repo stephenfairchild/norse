@@ -148,7 +148,7 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
 
     draw_results(f, app, cols[0]);
 
-    let showing_repo_answer = app.repo_answer_loading || !app.repo_answer.is_empty();
+    let showing_repo_answer = app.repo_answer_loading || !app.repo_conversation.is_empty();
     if showing_repo_answer {
         draw_repo_answer(f, app, cols[1]);
     } else {
@@ -159,7 +159,14 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
         let prompt_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(ORANGE))
-            .title(Span::styled(" Ask about this repo ", Style::default().fg(YELLOW)))
+            .title(Span::styled(
+            if !app.collected_repos.is_empty() {
+                format!(" Ask about {} repos ", app.collected_repos.len())
+            } else {
+                " Ask about this repo ".to_string()
+            },
+            Style::default().fg(YELLOW),
+        ))
             .style(Style::default().bg(BG));
         let prompt_input = Paragraph::new(Line::from(vec![
             Span::styled("/", Style::default().fg(YELLOW)),
@@ -171,51 +178,87 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_repo_answer(f: &mut Frame, app: &App, area: Rect) {
-    let selected_repo = app.search.results.get(app.search.selected).map(|r| r.repo.as_str()).unwrap_or("");
+    let focused = matches!(app.focus, Focus::Answer);
+    let border_color = if focused { ORANGE } else { AQUA };
+    let title = if !app.collected_repos.is_empty() {
+        format!(" {} repos ", app.collected_repos.len())
+    } else {
+        let display = app.picker_display();
+        format!(" {} ", display.get(app.search.selected).copied().unwrap_or(""))
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(AQUA))
-        .title(Span::styled(format!(" {} ", selected_repo), Style::default().fg(AQUA).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(title, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
+        .title_bottom(Span::styled(
+            if focused { " j/k scroll · ctrl-d/u page · ctrl-h back " } else { " ctrl-l to focus " },
+            Style::default().fg(GRAY),
+        ))
         .style(Style::default().bg(BG));
 
-    if app.repo_answer_loading {
-        let mut lines: Vec<Line> = app.repo_progress.iter().map(|msg| {
-            if msg.starts_with("$ ") {
-                Line::from(Span::styled(msg.clone(), Style::default().fg(YELLOW)))
-            } else {
-                Line::from(Span::styled(msg.clone(), Style::default().fg(GRAY)))
-            }
-        }).collect();
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(" Thinking…", Style::default().fg(GRAY))));
+    let scroll = (app.repo_answer_scroll as u16, 0);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (q, a)) in app.repo_conversation.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
         }
-        f.render_widget(
-            Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: false }),
-            area,
-        );
-    } else {
-        f.render_widget(
-            Paragraph::new(app.repo_answer.as_str())
-                .block(block)
-                .style(Style::default().fg(FG).bg(BG))
-                .wrap(Wrap { trim: false }),
-            area,
-        );
+        lines.push(Line::from(Span::styled(
+            format!("▶ {}", q),
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        )));
+        for text_line in a.lines() {
+            lines.push(Line::from(Span::styled(text_line.to_string(), Style::default().fg(FG))));
+        }
     }
+
+    if app.repo_answer_loading {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("▶ {}", app.repo_current_question),
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        )));
+        let progress_lines: Vec<&String> = app.repo_progress.iter().collect();
+        if progress_lines.is_empty() {
+            lines.push(Line::from(Span::styled(" Thinking…", Style::default().fg(GRAY))));
+        } else {
+            for msg in progress_lines {
+                let style = if msg.starts_with("$ ") {
+                    Style::default().fg(YELLOW)
+                } else {
+                    Style::default().fg(GRAY)
+                };
+                lines.push(Line::from(Span::styled(msg.clone(), style)));
+            }
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll(scroll)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_results(f: &mut Frame, app: &App, area: Rect) {
     let focused = matches!(app.focus, Focus::Results);
     let border_color = if focused { ORANGE } else { BG2 };
 
+    let display = app.picker_display();
+    let uncollected_count = display.len().saturating_sub(app.collected_repos.len());
+
     let title = if app.search.loading {
         " searching… ".to_string()
     } else if let Some(ref err) = app.search.error {
         format!(" {} ", err)
+    } else if app.collected_repos.is_empty() {
+        format!(" {} repos ", display.len())
     } else {
-        format!(" {} repos ", app.search.results.len())
+        format!(" {} repos  {} collected ", display.len(), app.collected_repos.len())
     };
     let title_style = if app.search.error.is_some() {
         Style::default().fg(RED)
@@ -223,24 +266,32 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(GRAY)
     };
 
-    let items: Vec<ListItem> = app.search.results.iter().enumerate().map(|(i, r)| {
+    let items: Vec<ListItem> = display.iter().enumerate().map(|(i, &repo)| {
         let is_selected = i == app.search.selected;
-        let (bg, dimmed) = if is_selected { (BLUE, BLUE) } else { (BG, BG) };
-        let (org, name) = r.repo.split_once('/').unwrap_or(("", &r.repo));
-        let w_mark = if app.watched_repos.contains(&r.repo) {
-            Span::styled("W ", Style::default().fg(YELLOW).bg(dimmed))
+        let is_collected = i >= uncollected_count;
+        let base_bg = if is_collected { BG1 } else { BG };
+        let bg = if is_selected { BLUE } else { base_bg };
+        let (org, name) = repo.split_once('/').unwrap_or(("", repo));
+        let c_mark = if is_collected {
+            Span::styled("C ", Style::default().fg(ORANGE).bg(bg))
         } else {
-            Span::styled("  ", Style::default().bg(dimmed))
+            Span::styled("  ", Style::default().bg(bg))
+        };
+        let w_mark = if app.watched_repos.contains(repo) {
+            Span::styled("W ", Style::default().fg(YELLOW).bg(bg))
+        } else {
+            Span::styled("  ", Style::default().bg(bg))
         };
         ListItem::new(Line::from(vec![
+            c_mark,
             w_mark,
-            Span::styled(format!(" {}/", org), Style::default().fg(GRAY).bg(dimmed)),
+            Span::styled(format!(" {}/", org), Style::default().fg(GRAY).bg(bg)),
             Span::styled(format!("{} ", name), Style::default().fg(if is_selected { BG } else { FG }).bg(bg).add_modifier(Modifier::BOLD)),
         ]))
     }).collect();
 
     let mut list_state = ListState::default();
-    if !app.search.results.is_empty() {
+    if !display.is_empty() {
         list_state.select(Some(app.search.selected));
     }
 
@@ -464,7 +515,7 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ORANGE))
         .title_bottom(Span::styled(
-            " ctrl-h/l tabs · ↑↓ navigate · enter open · q back ",
+            " ctrl-h/l tabs · ↑↓ navigate · enter diff · ctrl-x open · q back ",
             Style::default().fg(GRAY),
         ))
         .style(Style::default().bg(BG));

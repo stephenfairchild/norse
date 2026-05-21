@@ -91,12 +91,15 @@ pub struct GithubClient {
     client: Client,
     token: String,
     pub orgs: Vec<String>,
+    base_url: String,
 }
 
 impl GithubClient {
     pub fn new(token: String, orgs: Vec<String>) -> Result<Self> {
         let client = Client::builder().user_agent("acv-terminal/0.1").build()?;
-        Ok(Self { client, token, orgs })
+        let base_url = std::env::var("NORSE_GITHUB_API")
+            .unwrap_or_else(|_| "https://api.github.com".to_string());
+        Ok(Self { client, token, orgs, base_url })
     }
 
     pub async fn search_repos(&self, query: &str) -> Result<Vec<String>> {
@@ -116,7 +119,7 @@ impl GithubClient {
         let q = format!("{} in:name org:{} archived:false", query, org);
         let resp: RepoSearchResponse = self
             .client
-            .get("https://api.github.com/search/repositories")
+            .get(format!("{}/search/repositories", self.base_url))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -135,7 +138,7 @@ impl GithubClient {
         let q = "is:pr is:open review-requested:@me archived:false";
         let resp: PrSearchResponse = self
             .client
-            .get("https://api.github.com/search/issues")
+            .get(format!("{}/search/issues", self.base_url))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -146,9 +149,10 @@ impl GithubClient {
             .json()
             .await?;
 
+        let repos_prefix = format!("{}/repos/", self.base_url);
         let mut prs: Vec<PrItem> = resp.items.into_iter().map(|i| {
             let repo = i.repository_url
-                .strip_prefix("https://api.github.com/repos/")
+                .strip_prefix(&repos_prefix)
                 .unwrap_or(&i.repository_url)
                 .to_string();
             PrItem {
@@ -179,7 +183,7 @@ impl GithubClient {
         let q = format!("is:pr is:open org:{} archived:false", org);
         let resp: PrSearchResponse = self
             .client
-            .get("https://api.github.com/search/issues")
+            .get(format!("{}/search/issues", self.base_url))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -190,9 +194,10 @@ impl GithubClient {
             .json()
             .await?;
 
+        let repos_prefix = format!("{}/repos/", self.base_url);
         Ok(resp.items.into_iter().map(|i| {
             let repo = i.repository_url
-                .strip_prefix("https://api.github.com/repos/")
+                .strip_prefix(&repos_prefix)
                 .unwrap_or(&i.repository_url)
                 .to_string();
             PrItem {
@@ -213,7 +218,7 @@ impl GithubClient {
     pub async fn get_pr_url(&self, repo: &str, sha: &str) -> Result<String> {
         let prs: Vec<PullRequest> = self
             .client
-            .get(format!("https://api.github.com/repos/{}/commits/{}/pulls", repo, sha))
+            .get(format!("{}/repos/{}/commits/{}/pulls", self.base_url, repo, sha))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -240,7 +245,7 @@ impl GithubClient {
     async fn fetch_languages(&self, repo: &str) -> Result<Vec<(String, f64)>> {
         let map: HashMap<String, u64> = self
             .client
-            .get(format!("https://api.github.com/repos/{}/languages", repo))
+            .get(format!("{}/repos/{}/languages", self.base_url, repo))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -263,10 +268,25 @@ impl GithubClient {
         Ok(langs)
     }
 
+    pub async fn get_pr_diff(&self, repo: &str, number: u32) -> Result<String> {
+        let text = self
+            .client
+            .get(format!("{}/repos/{}/pulls/{}", self.base_url, repo, number))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github.diff")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(text)
+    }
+
     pub async fn get_commit_diff(&self, repo: &str, sha: &str) -> Result<String> {
         let text = self
             .client
-            .get(format!("https://api.github.com/repos/{}/commits/{}", repo, sha))
+            .get(format!("{}/repos/{}/commits/{}", self.base_url, repo, sha))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github.diff")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -281,7 +301,7 @@ impl GithubClient {
     async fn fetch_commits(&self, repo: &str) -> Result<Vec<CommitInfo>> {
         let commits: Vec<ApiCommit> = self
             .client
-            .get(format!("https://api.github.com/repos/{}/commits", repo))
+            .get(format!("{}/repos/{}/commits", self.base_url, repo))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -309,7 +329,7 @@ impl GithubClient {
         loop {
             let repos: Vec<WatchedRepo> = self
                 .client
-                .get("https://api.github.com/user/subscriptions")
+                .get(format!("{}/user/subscriptions", self.base_url))
                 .header("Authorization", format!("Bearer {}", self.token))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
@@ -331,7 +351,7 @@ impl GithubClient {
 
     pub async fn watch_repo(&self, owner: &str, repo: &str) -> Result<()> {
         self.client
-            .put(format!("https://api.github.com/repos/{}/{}/subscription", owner, repo))
+            .put(format!("{}/repos/{}/{}/subscription", self.base_url, owner, repo))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -344,7 +364,7 @@ impl GithubClient {
 
     pub async fn unwatch_repo(&self, owner: &str, repo: &str) -> Result<()> {
         self.client
-            .delete(format!("https://api.github.com/repos/{}/{}/subscription", owner, repo))
+            .delete(format!("{}/repos/{}/{}/subscription", self.base_url, owner, repo))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")

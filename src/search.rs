@@ -73,15 +73,5 @@ impl SearchState {
         }
     }
 
-    pub fn next(&mut self) {
-        if !self.results.is_empty() {
-            self.selected = (self.selected + 1) % self.results.len();
-        }
-    }
 
-    pub fn prev(&mut self) {
-        if !self.results.is_empty() {
-            self.selected = self.selected.saturating_sub(1);
-        }
-    }
 }

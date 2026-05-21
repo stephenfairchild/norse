@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"full_name": "test-org/alpha-repo"},
+    {"full_name": "test-org/beta-service"}
+  ]
+}

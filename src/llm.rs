@@ -96,7 +96,7 @@ Diff:
             .join(""))
     }
 
-    pub async fn ask_repo(&self, repo: &str, question: &str, progress: tokio::sync::mpsc::Sender<String>) -> Result<String> {
+    pub async fn ask_repo(&self, repo: &str, question: &str, history: &[(String, String)], progress: tokio::sync::mpsc::Sender<String>) -> Result<String> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let repo_url = format!("https://github.com/{}", repo);
 
@@ -115,15 +115,105 @@ Diff:
             }
         });
 
-        let mut messages: Vec<serde_json::Value> = vec![
-            json!({"role": "user", "content": question}),
-        ];
+        let mut messages: Vec<serde_json::Value> = history.iter().flat_map(|(q, a)| [
+            json!({"role": "user", "content": q.as_str()}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": a.as_str()}]}),
+        ]).collect();
+        messages.push(json!({"role": "user", "content": question}));
 
         for _ in 0..20 {
             let body = json!({
                 "model": self.model,
                 "max_tokens": 1024,
                 "system": format!("You are a code assistant for the GitHub repo {}. Use the github_cli tool to read from the repo and answer the question. Only use read-only commands.", repo_url),
+                "tools": [tool],
+                "messages": messages,
+            });
+
+            let resp: serde_json::Value = self.client
+                .post(&url)
+                .header("x-api-key", &self.auth_token)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+
+            let stop_reason = resp["stop_reason"].as_str().unwrap_or("").to_string();
+            let content = resp["content"].as_array().cloned().unwrap_or_default();
+
+            messages.push(json!({"role": "assistant", "content": content}));
+
+            if stop_reason == "tool_use" {
+                let mut tool_results: Vec<serde_json::Value> = Vec::new();
+                for block in &content {
+                    if block["type"].as_str() == Some("tool_use") {
+                        let id = block["id"].as_str().unwrap_or("").to_string();
+                        let command = block["input"]["command"].as_str().unwrap_or("").to_string();
+                        let _ = progress.send(format!("$ {}", command)).await;
+                        let output = run_gh_command(&command).await;
+                        let _ = progress.send(format!("  {} bytes", output.len())).await;
+                        tool_results.push(json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": output,
+                        }));
+                    }
+                }
+                messages.push(json!({"role": "user", "content": tool_results}));
+            } else {
+                let text: String = content.iter()
+                    .filter(|b| b["type"].as_str() == Some("text"))
+                    .filter_map(|b| b["text"].as_str().map(String::from))
+                    .collect::<Vec<_>>()
+                    .join("");
+                return Ok(text);
+            }
+        }
+
+        Ok("Reached tool call limit without a final answer.".into())
+    }
+
+    pub async fn ask_repos(&self, repos: &[String], question: &str, history: &[(String, String)], progress: tokio::sync::mpsc::Sender<String>) -> Result<String> {
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let repo_list = repos.iter()
+            .map(|r| format!("  - https://github.com/{}", r))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tool = json!({
+            "name": "github_cli",
+            "description": "Run a read-only gh CLI command to fetch information from GitHub repositories.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A read-only gh CLI command"
+                    }
+                },
+                "required": ["command"]
+            }
+        });
+
+        let system = format!(
+            "You are a code assistant with access to these GitHub repositories:\n{}\nUse the github_cli tool to read from any of these repos and answer the question. Only use read-only commands.",
+            repo_list
+        );
+
+        let mut messages: Vec<serde_json::Value> = history.iter().flat_map(|(q, a)| [
+            json!({"role": "user", "content": q.as_str()}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": a.as_str()}]}),
+        ]).collect();
+        messages.push(json!({"role": "user", "content": question}));
+
+        for _ in 0..20 {
+            let body = json!({
+                "model": self.model,
+                "max_tokens": 1024,
+                "system": system,
                 "tools": [tool],
                 "messages": messages,
             });
