@@ -466,16 +466,43 @@ fn draw_diff(f: &mut Frame, app: &App) {
         diff_inner,
     );
 
-    // Right: AI summary / answer + optional prompt input
+    // Right: status bar + AI summary / answer + optional prompt input
     let right_chunks = if app.diff_prompt_active {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(3)])
             .split(cols[1])
             .to_vec()
     } else {
-        vec![cols[1]]
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(cols[1])
+            .to_vec()
     };
+
+    // Status bar: PR# · Jira · approval
+    {
+        let approved = app.current_diff_approved();
+        let mut spans = vec![Span::styled(" ", Style::default().bg(BG1))];
+        if let Some(number) = app.diff_pr_number {
+            spans.push(Span::styled(format!("PR #{}", number), Style::default().fg(YELLOW).bg(BG1).add_modifier(Modifier::BOLD)));
+        }
+        if let Some(ref jira) = app.diff_jira {
+            spans.push(Span::styled("  ·  ", Style::default().fg(GRAY).bg(BG1)));
+            spans.push(Span::styled(jira.clone(), Style::default().fg(BLUE).bg(BG1).add_modifier(Modifier::BOLD)));
+        }
+        spans.push(Span::styled("  ·  ", Style::default().fg(GRAY).bg(BG1)));
+        if approved {
+            spans.push(Span::styled("✓ approved", Style::default().fg(GREEN).bg(BG1).add_modifier(Modifier::BOLD)));
+        } else {
+            spans.push(Span::styled("not approved", Style::default().fg(GRAY).bg(BG1)));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(BG1)),
+            right_chunks[0],
+        );
+    }
 
     let showing_answer = app.diff_answer_loading || !app.diff_answer.is_empty();
     let (panel_title, panel_color) = if showing_answer {
@@ -495,7 +522,7 @@ fn draw_diff(f: &mut Frame, app: &App) {
         f.render_widget(
             Paragraph::new(Span::styled(" Thinking…", Style::default().fg(GRAY)))
                 .block(summary_block),
-            right_chunks[0],
+            right_chunks[1],
         );
     } else if showing_answer {
         f.render_widget(
@@ -503,13 +530,13 @@ fn draw_diff(f: &mut Frame, app: &App) {
                 .block(summary_block)
                 .style(Style::default().fg(FG).bg(BG))
                 .wrap(Wrap { trim: false }),
-            right_chunks[0],
+            right_chunks[1],
         );
     } else if app.summary_loading {
         f.render_widget(
             Paragraph::new(Span::styled(" Summarizing…", Style::default().fg(GRAY)))
                 .block(summary_block),
-            right_chunks[0],
+            right_chunks[1],
         );
     } else {
         f.render_widget(
@@ -517,7 +544,7 @@ fn draw_diff(f: &mut Frame, app: &App) {
                 .block(summary_block)
                 .style(Style::default().fg(FG).bg(BG))
                 .wrap(Wrap { trim: false }),
-            right_chunks[0],
+            right_chunks[1],
         );
     }
 
@@ -531,7 +558,7 @@ fn draw_diff(f: &mut Frame, app: &App) {
             Span::styled(app.diff_prompt_input.as_str(), Style::default().fg(FG)),
             Span::styled("█", Style::default().fg(ORANGE)),
         ])).block(prompt_block);
-        f.render_widget(input, right_chunks[1]);
+        f.render_widget(input, right_chunks[2]);
     }
 }
 

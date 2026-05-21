@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use crate::config::Config;
-use crate::github::{GithubClient, PrItem, RepoActivity, RepoPreview};
+use crate::github::{extract_jira, GithubClient, PrItem, RepoActivity, RepoPreview};
 use crate::llm::LlmClient;
 use crate::search::{SearchResult, SearchState};
 
@@ -73,6 +73,7 @@ pub struct App {
     pub diff_sha: String,
     pub diff_url: Option<String>,
     pub diff_pr_number: Option<u32>,
+    pub diff_jira: Option<String>,
     pub approved_prs: HashSet<String>,
     pub summary: String,
     pub summary_loading: bool,
@@ -189,6 +190,7 @@ impl App {
             diff_sha: String::new(),
             diff_url: None,
             diff_pr_number: None,
+            diff_jira: None,
             approved_prs,
             summary: String::new(),
             summary_loading: false,
@@ -819,6 +821,7 @@ impl App {
         self.diff_sha = String::new();
         self.diff_url = Some(pr.html_url.clone());
         self.diff_pr_number = Some(number);
+        self.diff_jira = extract_jira(&pr.title);
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;
@@ -857,6 +860,7 @@ impl App {
         self.diff_sha = sha.clone();
         self.diff_url = None;
         self.diff_pr_number = None;
+        self.diff_jira = None;
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;

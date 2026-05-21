@@ -534,7 +534,7 @@ impl GithubClient {
     }
 }
 
-fn extract_jira(text: &str) -> Option<String> {
+pub fn extract_jira(text: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut i = 0;
     while i < b.len() {
