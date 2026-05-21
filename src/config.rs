@@ -5,12 +5,20 @@ use std::fs;
 #[derive(Deserialize)]
 pub struct Config {
     pub github: GithubConfig,
+    #[serde(default)]
+    pub model: ModelConfig,
 }
 
 #[derive(Deserialize)]
 pub struct GithubConfig {
     pub token: String,
     pub orgs: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ModelConfig {
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 impl Config {

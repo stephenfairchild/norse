@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use crate::config::Config;
-use crate::github::{GithubClient, PrItem, RepoPreview};
+use crate::github::{GithubClient, PrItem, RepoActivity, RepoPreview};
 use crate::llm::LlmClient;
 use crate::search::{SearchResult, SearchState};
 
@@ -13,6 +13,8 @@ pub enum Mode {
     Picker,
     Diff,
     PrBrowser,
+    News,
+    ModelPicker,
 }
 
 pub enum Focus {
@@ -27,6 +29,7 @@ pub enum PrTab {
     ByRepo,
     ReviewsRequested,
     Watching,
+    RecentlyClosed,
 }
 
 impl PrTab {
@@ -36,7 +39,8 @@ impl PrTab {
             PrTab::ByPeople          => PrTab::ByRepo,
             PrTab::ByRepo            => PrTab::ReviewsRequested,
             PrTab::ReviewsRequested  => PrTab::Watching,
-            PrTab::Watching          => PrTab::Watching,
+            PrTab::Watching          => PrTab::RecentlyClosed,
+            PrTab::RecentlyClosed    => PrTab::RecentlyClosed,
         }
     }
     pub fn prev(&self) -> Self {
@@ -46,6 +50,7 @@ impl PrTab {
             PrTab::ByRepo            => PrTab::ByPeople,
             PrTab::ReviewsRequested  => PrTab::ByRepo,
             PrTab::Watching          => PrTab::ReviewsRequested,
+            PrTab::RecentlyClosed    => PrTab::Watching,
         }
     }
 }
@@ -67,6 +72,8 @@ pub struct App {
     pub diff_repo: String,
     pub diff_sha: String,
     pub diff_url: Option<String>,
+    pub diff_pr_number: Option<u32>,
+    pub approved_prs: HashSet<String>,
     pub summary: String,
     pub summary_loading: bool,
     pub diff_prompt_active: bool,
@@ -96,6 +103,17 @@ pub struct App {
     pub pr_repo_selected: usize,
     pub pr_watching_selected: usize,
     pub watched_repos: HashSet<String>,
+    pub pr_closed_items: Vec<PrItem>,
+    pub pr_closed_loading: bool,
+    pub pr_closed_error: Option<String>,
+    pub pr_closed_selected: usize,
+    pub news_content: String,
+    pub news_loading: bool,
+    pub news_error: Option<String>,
+    pub news_scroll: usize,
+    pub model_list: Vec<String>,
+    pub model_selected: usize,
+    pub active_model: Option<String>,
     github: Option<Arc<GithubClient>>,
     llm: Option<Arc<LlmClient>>,
     debounce: Option<Instant>,
@@ -115,20 +133,25 @@ pub struct App {
     pr_rx: mpsc::Receiver<Result<Vec<PrItem>, String>>,
     pr_reviews_tx: mpsc::Sender<Result<Vec<PrItem>, String>>,
     pr_reviews_rx: mpsc::Receiver<Result<Vec<PrItem>, String>>,
+    pr_closed_tx: mpsc::Sender<Result<Vec<PrItem>, String>>,
+    pr_closed_rx: mpsc::Receiver<Result<Vec<PrItem>, String>>,
     watch_rx: mpsc::Receiver<Result<HashSet<String>, String>>,
+    news_tx: mpsc::Sender<Result<String, String>>,
+    news_rx: mpsc::Receiver<Result<String, String>>,
 }
 
 impl App {
     pub fn new() -> Self {
-        let (orgs, github) = match Config::load() {
+        let (orgs, github, model_list) = match Config::load() {
             Ok(c) => {
                 let orgs = c.github.orgs.clone();
                 let gh = GithubClient::new(c.github.token, c.github.orgs).ok().map(Arc::new);
-                (orgs, gh)
+                (orgs, gh, c.model.models)
             }
-            Err(_) => (Vec::new(), None),
+            Err(_) => (Vec::new(), None, Vec::new()),
         };
-        let llm = LlmClient::from_claude_settings().ok().map(Arc::new);
+        let active_model = load_saved_model();
+        let llm = LlmClient::from_claude_settings(active_model.clone()).ok().map(Arc::new);
         let (diff_tx, diff_rx) = mpsc::channel(4);
         let (summary_tx, summary_rx) = mpsc::channel(4);
         let (answer_tx, answer_rx) = mpsc::channel(4);
@@ -136,7 +159,9 @@ impl App {
         let (repo_progress_tx, repo_progress_rx) = mpsc::channel(64);
         let (pr_tx, pr_rx) = mpsc::channel(4);
         let (pr_reviews_tx, pr_reviews_rx) = mpsc::channel(4);
+        let (pr_closed_tx, pr_closed_rx) = mpsc::channel(4);
         let (watch_tx, watch_rx) = mpsc::channel(4);
+        let (news_tx, news_rx) = mpsc::channel(4);
         if let Some(ref gh) = github {
             let client = Arc::clone(gh);
             let tx = watch_tx.clone();
@@ -162,6 +187,8 @@ impl App {
             diff_repo: String::new(),
             diff_sha: String::new(),
             diff_url: None,
+            diff_pr_number: None,
+            approved_prs: HashSet::new(),
             summary: String::new(),
             summary_loading: false,
             diff_prompt_active: false,
@@ -191,6 +218,17 @@ impl App {
             pr_repo_selected: 0,
             pr_watching_selected: 0,
             watched_repos: HashSet::new(),
+            pr_closed_items: Vec::new(),
+            pr_closed_loading: false,
+            pr_closed_error: None,
+            pr_closed_selected: 0,
+            news_content: String::new(),
+            news_loading: false,
+            news_error: None,
+            news_scroll: 0,
+            model_list,
+            model_selected: 0,
+            active_model,
             github,
             llm,
             debounce: None,
@@ -210,8 +248,16 @@ impl App {
             pr_rx,
             pr_reviews_tx,
             pr_reviews_rx,
+            pr_closed_tx,
+            pr_closed_rx,
             watch_rx,
+            news_tx,
+            news_rx,
         }
+    }
+
+    pub fn llm_model(&self) -> Option<&str> {
+        self.llm.as_ref().map(|c| c.active_model())
     }
 
     pub fn poll(&mut self) {
@@ -305,9 +351,25 @@ impl App {
             }
         }
 
+        while let Ok(result) = self.pr_closed_rx.try_recv() {
+            self.pr_closed_loading = false;
+            match result {
+                Ok(prs) => { self.pr_closed_items = prs; self.pr_closed_selected = 0; }
+                Err(e) => self.pr_closed_error = Some(e),
+            }
+        }
+
         while let Ok(result) = self.watch_rx.try_recv() {
             if let Ok(repos) = result {
                 self.watched_repos = repos;
+            }
+        }
+
+        while let Ok(result) = self.news_rx.try_recv() {
+            self.news_loading = false;
+            match result {
+                Ok(content) => self.news_content = content,
+                Err(e) => self.news_error = Some(e),
             }
         }
 
@@ -463,14 +525,10 @@ impl App {
         let Some((owner, name)) = repo.split_once('/').map(|(o, n)| (o.to_string(), n.to_string())) else { return; };
         if self.watched_repos.contains(&repo) {
             self.watched_repos.remove(&repo);
-            tokio::spawn(async move {
-                let _ = client.unwatch_repo(&owner, &name).await;
-            });
+            tokio::spawn(async move { let _ = client.unwatch_repo(&owner, &name).await; });
         } else {
             self.watched_repos.insert(repo);
-            tokio::spawn(async move {
-                let _ = client.watch_repo(&owner, &name).await;
-            });
+            tokio::spawn(async move { let _ = client.watch_repo(&owner, &name).await; });
         }
     }
 
@@ -478,8 +536,16 @@ impl App {
         // Tab switching always takes priority
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
-                KeyCode::Char('l') => { self.pr_tab = self.pr_tab.next(); return; }
-                KeyCode::Char('h') => { self.pr_tab = self.pr_tab.prev(); return; }
+                KeyCode::Char('l') => {
+                    self.pr_tab = self.pr_tab.next();
+                    self.on_pr_tab_enter();
+                    return;
+                }
+                KeyCode::Char('h') => {
+                    self.pr_tab = self.pr_tab.prev();
+                    self.on_pr_tab_enter();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -489,7 +555,60 @@ impl App {
             PrTab::ByRepo           => self.handle_pr_repo(key),
             PrTab::ReviewsRequested => self.handle_pr_reviews(key),
             PrTab::Watching         => self.handle_pr_watching(key),
+            PrTab::RecentlyClosed   => self.handle_pr_closed(key),
         }
+    }
+
+    fn on_pr_tab_enter(&mut self) {
+        if matches!(self.pr_tab, PrTab::RecentlyClosed)
+            && !self.pr_closed_loading
+            && self.pr_closed_items.is_empty()
+            && self.pr_closed_error.is_none()
+        {
+            self.fire_closed_load();
+        }
+    }
+
+    fn handle_pr_closed(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                self.mode = Mode::Normal;
+                self.needs_clear = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                let len = self.pr_closed_items.len();
+                if len > 0 { self.pr_closed_selected = (self.pr_closed_selected + 1).min(len - 1); }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                self.pr_closed_selected = self.pr_closed_selected.saturating_sub(1);
+            }
+            (_, KeyCode::Enter) => {
+                if let Some(pr) = self.pr_closed_items.get(self.pr_closed_selected).cloned() {
+                    self.open_pr_diff(&pr);
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+                if let Some(pr) = self.pr_closed_items.get(self.pr_closed_selected) {
+                    open_in_browser(&pr.html_url.clone());
+                }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('r')) => self.fire_closed_load(),
+            _ => {}
+        }
+    }
+
+    fn fire_closed_load(&mut self) {
+        let Some(client) = self.github.clone() else {
+            self.pr_closed_error = Some("no github client configured".into());
+            return;
+        };
+        let tx = self.pr_closed_tx.clone();
+        self.pr_closed_loading = true;
+        self.pr_closed_error = None;
+        tokio::spawn(async move {
+            let result = client.fetch_recently_closed_prs().await.map_err(|e| e.to_string());
+            let _ = tx.send(result).await;
+        });
     }
 
     fn handle_pr_reviews(&mut self, key: KeyEvent) {
@@ -690,6 +809,7 @@ impl App {
         self.diff_repo = repo.clone();
         self.diff_sha = String::new();
         self.diff_url = Some(pr.html_url.clone());
+        self.diff_pr_number = Some(number);
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;
@@ -727,6 +847,7 @@ impl App {
         self.diff_repo = repo.clone();
         self.diff_sha = sha.clone();
         self.diff_url = None;
+        self.diff_pr_number = None;
         self.diff_lines.clear();
         self.diff_loading = true;
         self.diff_scroll = 0;
@@ -757,6 +878,8 @@ impl App {
             Mode::Picker => self.handle_picker(key),
             Mode::Diff => self.handle_diff(key),
             Mode::PrBrowser => self.handle_pr_browser(key),
+            Mode::News => self.handle_news(key),
+            Mode::ModelPicker => self.handle_model_picker(key),
         }
     }
 
@@ -782,7 +905,48 @@ impl App {
                 self.pr_repo_selected = 0;
                 self.fire_pr_load();
             }
+            (KeyModifiers::NONE, KeyCode::Char('n')) => {
+                self.mode = Mode::News;
+                self.news_scroll = 0;
+                self.news_content.clear();
+                self.news_error = None;
+                self.fire_news_load();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('m')) => {
+                if !self.model_list.is_empty() {
+                    self.model_selected = self.model_list.iter().position(|m| {
+                        Some(m) == self.active_model.as_ref()
+                    }).unwrap_or(0);
+                    self.mode = Mode::ModelPicker;
+                }
+            }
             (_, KeyCode::Char('q')) => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn handle_model_picker(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                self.mode = Mode::Normal;
+                self.needs_clear = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                let len = self.model_list.len();
+                if len > 0 { self.model_selected = (self.model_selected + 1).min(len - 1); }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                self.model_selected = self.model_selected.saturating_sub(1);
+            }
+            (_, KeyCode::Enter) => {
+                if let Some(model) = self.model_list.get(self.model_selected).cloned() {
+                    save_model(&model);
+                    self.active_model = Some(model.clone());
+                    self.llm = LlmClient::from_claude_settings(Some(model)).ok().map(Arc::new);
+                    self.mode = Mode::Normal;
+                    self.needs_clear = true;
+                }
+            }
             _ => {}
         }
     }
@@ -956,6 +1120,20 @@ impl App {
                     }
                 }
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+                if let Some(number) = self.diff_pr_number {
+                    let repo = self.diff_repo.clone();
+                    let key = format!("{}#{}", repo, number);
+                    if !self.approved_prs.contains(&key) {
+                        self.approved_prs.insert(key);
+                        if let Some(client) = self.github.clone() {
+                            tokio::spawn(async move { let _ = client.approve_pr(&repo, number).await; });
+                        }
+                        self.mode = Mode::PrBrowser;
+                        self.needs_clear = true;
+                    }
+                }
+            }
             (KeyModifiers::NONE, KeyCode::Char('/')) => {
                 self.diff_prompt_active = true;
                 self.diff_prompt_input.clear();
@@ -993,6 +1171,50 @@ impl App {
         }
     }
 
+    fn handle_news(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                self.mode = Mode::Normal;
+                self.needs_clear = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                self.news_scroll = self.news_scroll.saturating_add(1);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                self.news_scroll = self.news_scroll.saturating_sub(1);
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+                self.news_scroll = self.news_scroll.saturating_add(15);
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                self.news_scroll = self.news_scroll.saturating_sub(15);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('r')) => {
+                self.news_scroll = 0;
+                self.news_content.clear();
+                self.news_error = None;
+                self.fire_news_load();
+            }
+            _ => {}
+        }
+    }
+
+    fn fire_news_load(&mut self) {
+        let Some(client) = self.github.clone() else {
+            self.news_error = Some("no github client configured".into());
+            return;
+        };
+        let tx = self.news_tx.clone();
+        self.news_loading = true;
+        tokio::spawn(async move {
+            let activity = match client.fetch_news_activity().await {
+                Ok(a) => a,
+                Err(e) => { let _ = tx.send(Err(e.to_string())).await; return; }
+            };
+            let _ = tx.send(Ok(format_news_activity(&activity))).await;
+        });
+    }
+
     fn fire_diff_question(&mut self) {
         let question = self.diff_prompt_input.trim().to_string();
         if question.is_empty() { return; }
@@ -1009,6 +1231,49 @@ impl App {
             let result = client.ask_diff(&diff, &repo, &question).await.map_err(|e| e.to_string());
             let _ = tx.send(result).await;
         });
+    }
+}
+
+fn format_news_activity(activity: &[RepoActivity]) -> String {
+    if activity.is_empty() {
+        return "No pull request activity found in the last 24 hours.".into();
+    }
+    let mut out = String::new();
+    for ra in activity {
+        if ra.prs.is_empty() { continue; }
+        let watch = if ra.is_watched { " [watched]" } else { "" };
+        out.push_str(&format!("REPO: {}{}\n", ra.repo, watch));
+        for p in &ra.prs {
+            let jira = p.jira.as_deref().map(|j| format!(" [{}]", j)).unwrap_or_default();
+            out.push_str(&format!(
+                "  PR #{} [{}]{} \"{}\" by {}\n  GitHub: {}\n",
+                p.number, p.state, jira, p.title, p.author, p.html_url
+            ));
+            if let Some(ref body) = p.body {
+                out.push_str(&format!("  Description: {}\n", body));
+            }
+        }
+        out.push('\n');
+    }
+    if out.trim().is_empty() {
+        "No pull request activity found in the last 24 hours.".into()
+    } else {
+        out
+    }
+}
+
+fn load_saved_model() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let s = std::fs::read_to_string(format!("{}/.norsedata/model", home)).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn save_model(model: &str) {
+    if let Ok(home) = std::env::var("HOME") {
+        let dir = format!("{}/.norsedata", home);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(format!("{}/model", dir), model);
     }
 }
 

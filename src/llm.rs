@@ -36,7 +36,7 @@ struct Block {
 }
 
 impl LlmClient {
-    pub fn from_claude_settings() -> Result<Self> {
+    pub fn from_claude_settings(model_override: Option<String>) -> Result<Self> {
         let home = std::env::var("HOME")?;
         let raw = std::fs::read_to_string(format!("{}/.claude/settings.json", home))?;
         let json: serde_json::Value = serde_json::from_str(&raw)?;
@@ -50,13 +50,18 @@ impl LlmClient {
                 .ok_or_else(|| anyhow::anyhow!("{} not found in settings.json", k))
         };
 
+        let model = model_override.unwrap_or_else(|| get("ANTHROPIC_MODEL").unwrap_or_default());
         let client = Client::builder().user_agent("norse/0.1").build()?;
         Ok(Self {
             client,
             auth_token: get("ANTHROPIC_AUTH_TOKEN")?,
             base_url: get("ANTHROPIC_BASE_URL")?,
-            model: get("ANTHROPIC_MODEL")?,
+            model,
         })
+    }
+
+    pub fn active_model(&self) -> &str {
+        &self.model
     }
 
     pub async fn summarize_diff(&self, diff: &str) -> Result<String> {
@@ -262,6 +267,47 @@ Diff:
         }
 
         Ok("Reached tool call limit without a final answer.".into())
+    }
+
+    pub async fn generate_news_summary(&self, activity_text: &str) -> Result<String> {
+        let content = if activity_text.len() > 12000 { &activity_text[..12000] } else { activity_text };
+        let prompt = format!(
+            r#"You are summarizing 24 hours of GitHub activity across repositories I watch.
+
+Instructions:
+1. DISCARD any PR that is purely: dependency upgrades, version bumps, chore/cleanup, linting, test-only, docs, or CI config with no user-facing impact. Be aggressive about discarding noise.
+2. For the remaining PRs, write one paragraph each describing what the change actually does and why it matters to the business or users. Be direct and specific — no workflow language ("a PR was opened"), no meta-commentary.
+3. Order by business impact, highest first. Max 20 items total.
+4. Separate each paragraph with exactly "---" on its own line.
+5. End each paragraph with the GitHub PR URL on its own line, and the Jira ticket (if present) on its own line.
+6. No bullet points. No headers. Just the paragraphs.
+
+GitHub activity (last 24 hours):
+{}"#,
+            content
+        );
+
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let resp: Response = self.client
+            .post(&url)
+            .header("x-api-key", &self.auth_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&Request {
+                model: &self.model,
+                max_tokens: 4096,
+                messages: vec![Msg { role: "user", content: &prompt }],
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(resp.content.into_iter()
+            .filter(|b| b.kind == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join(""))
     }
 
     pub async fn ask_diff(&self, diff: &str, repo: &str, question: &str) -> Result<String> {

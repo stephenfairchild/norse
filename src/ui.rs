@@ -32,6 +32,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_pr_browser(f, app);
         return;
     }
+    if matches!(app.mode, Mode::News) {
+        draw_news(f, app);
+        return;
+    }
 
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
@@ -46,6 +50,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if matches!(app.mode, Mode::Picker) {
         draw_picker(f, app, area);
+    }
+    if matches!(app.mode, Mode::ModelPicker) {
+        draw_model_picker(f, app, area);
     }
 }
 
@@ -63,11 +70,13 @@ fn draw_main(f: &mut Frame, area: Rect) {
     let keys: &[(&str, &str)] = &[
         ("r",      "search repos"),
         ("p",      "browse PRs"),
+        ("n",      "news (last 24h)"),
+        ("m",      "choose model"),
         ("q",      "quit"),
     ];
 
     let art_width = art.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
-    let content_height = (art.len() + 1 + 1 + 1 + keys.len()) as u16;  // art + blank + subtitle + blank + keys
+    let content_height = (art.len() + 1 + 1 + 1 + keys.len()) as u16;
 
     let mut lines: Vec<Line> = art
         .iter()
@@ -97,10 +106,17 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Mode::Picker => Span::styled(" PICKER ", Style::default().fg(BG).bg(BLUE).add_modifier(Modifier::BOLD)),
         Mode::Diff => Span::styled(" DIFF ", Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)),
         Mode::PrBrowser => Span::styled(" PRs ", Style::default().fg(BG).bg(YELLOW).add_modifier(Modifier::BOLD)),
+        Mode::News => Span::styled(" NEWS ", Style::default().fg(BG).bg(PURPLE).add_modifier(Modifier::BOLD)),
+        Mode::ModelPicker => Span::styled(" MODEL ", Style::default().fg(BG).bg(AQUA).add_modifier(Modifier::BOLD)),
     };
+    let model_info = app.active_model.as_deref()
+        .or_else(|| app.llm_model())
+        .map(|m| format!(" {} ", m))
+        .unwrap_or_default();
     let orgs = Span::styled(format!(" {} ", app.orgs.join(" · ")), Style::default().fg(GRAY).bg(BG1));
+    let model_span = Span::styled(model_info, Style::default().fg(AQUA).bg(BG1));
     f.render_widget(
-        Paragraph::new(Line::from(vec![mode_label, orgs])).style(Style::default().bg(BG1)),
+        Paragraph::new(Line::from(vec![mode_label, orgs, model_span])).style(Style::default().bg(BG1)),
         area,
     );
 }
@@ -421,7 +437,7 @@ fn draw_diff(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ORANGE))
         .title(Span::styled(format!(" {} ", app.diff_header), Style::default().fg(YELLOW)))
-        .title_bottom(Span::styled(" j/k line  ctrl-d/u page  ctrl-x open PR  q back ", Style::default().fg(GRAY)))
+        .title_bottom(Span::styled(" j/k line  ctrl-d/u page  ctrl-x open  ctrl-a approve  q back ", Style::default().fg(GRAY)))
         .style(Style::default().bg(BG));
 
     let diff_inner = diff_block.inner(cols[0]);
@@ -548,6 +564,8 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
         tab_span("  Review Requests  ", matches!(app.pr_tab, PrTab::ReviewsRequested)),
         Span::raw("  "),
         tab_span("  Watching  ", matches!(app.pr_tab, PrTab::Watching)),
+        Span::raw("  "),
+        tab_span("  Recently Closed  ", matches!(app.pr_tab, PrTab::RecentlyClosed)),
     ];
     f.render_widget(Paragraph::new(Line::from(tab_spans)).style(Style::default().bg(BG)), chunks[0]);
 
@@ -609,6 +627,12 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
                 app.pr_loading,
                 app.pr_error.as_deref(),
             ),
+            PrTab::RecentlyClosed => (
+                app.pr_closed_items.iter().collect(),
+                app.pr_closed_selected,
+                app.pr_closed_loading,
+                app.pr_closed_error.as_deref(),
+            ),
         };
 
     if loading {
@@ -633,7 +657,7 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
     let num_w = 6usize;
     let author_w = 14usize;
     let ago_w = 12usize;
-    let title_w = avail.saturating_sub(repo_w + num_w + author_w + ago_w + 4 + 2);
+    let title_w = avail.saturating_sub(repo_w + num_w + author_w + ago_w + 4 + 4);
 
     let items: Vec<ListItem> = prs.iter().enumerate().map(|(i, pr)| {
         let sel = i == selected_idx;
@@ -652,8 +676,15 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
         } else {
             Span::styled("  ", Style::default().bg(bg))
         };
+        let approved = app.approved_prs.contains(&format!("{}#{}", pr.repo, pr.number));
+        let a_mark = if approved {
+            Span::styled("A ", Style::default().fg(GREEN).bg(bg))
+        } else {
+            Span::styled("  ", Style::default().bg(bg))
+        };
         ListItem::new(Line::from(vec![
             w_mark,
+            a_mark,
             Span::styled(format!("{:<repo_w$}", trunc(&pr.repo, repo_w)), Style::default().fg(GRAY).bg(bg)),
             Span::styled(format!(" #{:<num_w$}", pr.number), Style::default().fg(YELLOW).bg(bg)),
             Span::styled(format!("{:<title_w$} ", title), Style::default().fg(fg).bg(bg)),
@@ -675,6 +706,78 @@ fn draw_pr_browser(f: &mut Frame, app: &App) {
         list_chunk,
         &mut list_state,
     );
+}
+
+fn draw_news(f: &mut Frame, app: &App) {
+    let area = f.area();
+    f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ORANGE))
+        .title(Span::styled(" News  (last 24h) ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
+        .title_bottom(Span::styled(
+            " j/k scroll · ctrl-d/u page · r refresh · q back ",
+            Style::default().fg(GRAY),
+        ))
+        .style(Style::default().bg(BG));
+
+    if app.news_loading {
+        f.render_widget(
+            Paragraph::new(Span::styled(" Generating news summary…", Style::default().fg(GRAY)))
+                .block(block),
+            chunks[0],
+        );
+    } else if let Some(ref err) = app.news_error {
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" error: {}", err), Style::default().fg(RED)))
+                .block(block),
+            chunks[0],
+        );
+    } else {
+        let inner_w = chunks[0].width.saturating_sub(2) as usize;
+        let lines = build_news_lines(&app.news_content, inner_w);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .scroll((app.news_scroll as u16, 0))
+                .wrap(Wrap { trim: false }),
+            chunks[0],
+        );
+    }
+
+    draw_statusbar(f, app, chunks[1]);
+}
+
+fn build_news_lines(content: &str, width: usize) -> Vec<Line<'static>> {
+    let divider = "─".repeat(width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, section) in content.split("\n---\n").enumerate() {
+        if i > 0 {
+            lines.push(Line::from(Span::styled(divider.clone(), Style::default().fg(BG2))));
+            lines.push(Line::from(""));
+        }
+        for text_line in section.trim_matches('\n').lines() {
+            let t = text_line.trim_start();
+            if t.starts_with("https://github.com") {
+                lines.push(Line::from(Span::styled(text_line.to_string(), Style::default().fg(BLUE))));
+            } else if t.len() > 2 && t.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                && t.contains('-') && t.split('-').next().map(|p| p.chars().all(|c| c.is_ascii_uppercase())).unwrap_or(false)
+            {
+                // Jira-style ticket on its own line e.g. "ENG-1234"
+                lines.push(Line::from(Span::styled(text_line.to_string(), Style::default().fg(YELLOW))));
+            } else {
+                lines.push(Line::from(text_line.to_string()));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    lines
 }
 
 fn time_ago(iso: &str) -> String {
@@ -813,4 +916,36 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_model_picker(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(60, 60, area);
+    f.render_widget(Clear, popup);
+
+    let items: Vec<ListItem> = app.model_list.iter().enumerate().map(|(i, m)| {
+        let active = app.active_model.as_deref() == Some(m.as_str());
+        let marker = if active { "* " } else { "  " };
+        let style = if i == app.model_selected {
+            Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)
+        } else if active {
+            Style::default().fg(AQUA)
+        } else {
+            Style::default().fg(FG)
+        };
+        ListItem::new(Line::from(Span::styled(format!("{}{}", marker, m), style)))
+    }).collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(AQUA))
+                .title(Span::styled(" Choose Model ", Style::default().fg(YELLOW)))
+                .title_bottom(Span::styled(" j/k  enter  esc ", Style::default().fg(GRAY)))
+                .style(Style::default().bg(BG)),
+        );
+
+    let mut state = ListState::default();
+    state.select(Some(app.model_selected));
+    f.render_stateful_widget(list, popup, &mut state);
 }
