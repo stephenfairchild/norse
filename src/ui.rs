@@ -407,7 +407,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("{} ", commit.sha), Style::default().fg(YELLOW).bg(bg)),
             Span::styled(format!("{:<14} ", trunc(&commit.author, 14)), Style::default().fg(AQUA).bg(bg)),
             Span::styled(format!("{:<width$} ", msg, width = msg_width), Style::default().fg(if is_selected { BG } else { FG }).bg(bg)),
-            Span::styled(commit.date.as_str(), Style::default().fg(GRAY).bg(bg)),
+            Span::styled(time_ago(&commit.date), Style::default().fg(GRAY).bg(bg)),
         ]))
     }).collect();
 
@@ -922,7 +922,7 @@ fn time_ago(iso: &str) -> String {
 
 fn parse_iso8601(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('Z');
-    let (date, time) = s.split_once('T')?;
+    let (date, time) = s.split_once('T').unwrap_or((s, "00:00:00"));
     let mut dp = date.split('-');
     let mut tp = time.split(':');
     let year: u64  = dp.next()?.parse().ok()?;

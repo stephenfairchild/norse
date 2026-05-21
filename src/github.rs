@@ -347,7 +347,7 @@ impl GithubClient {
                 sha: c.sha[..7.min(c.sha.len())].to_string(),
                 author: c.commit.author.name,
                 message: c.commit.message.lines().next().unwrap_or("").to_string(),
-                date: c.commit.author.date[..10.min(c.commit.author.date.len())].to_string(),
+                date: c.commit.author.date.clone(),
             })
             .collect())
     }
