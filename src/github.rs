@@ -96,7 +96,7 @@ pub struct GithubClient {
 
 impl GithubClient {
     pub fn new(token: String, orgs: Vec<String>) -> Result<Self> {
-        let client = Client::builder().user_agent("acv-terminal/0.1").build()?;
+        let client = Client::builder().user_agent("norse/0.1").build()?;
         let base_url = std::env::var("NORSE_GITHUB_API")
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         Ok(Self { client, token, orgs, base_url })

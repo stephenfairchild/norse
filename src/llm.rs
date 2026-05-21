@@ -50,7 +50,7 @@ impl LlmClient {
                 .ok_or_else(|| anyhow::anyhow!("{} not found in settings.json", k))
         };
 
-        let client = Client::builder().user_agent("acv-terminal/0.1").build()?;
+        let client = Client::builder().user_agent("norse/0.1").build()?;
         Ok(Self {
             client,
             auth_token: get("ANTHROPIC_AUTH_TOKEN")?,
