@@ -67,10 +67,21 @@ impl LlmClient {
     pub async fn summarize_diff(&self, diff: &str) -> Result<String> {
         let content = if diff.len() > 8000 { &diff[..8000] } else { diff };
         let prompt = format!(
-            r#"Summarize this git diff in 2-4 bullet points. Be brief and high-level only.
+            r#"Summarize this git diff. Output exactly two sections, no other text:
+
+## Summary
+2-4 bullet points, high-level only.
 - For UI changes: list affected routes (e.g. /dashboard, /settings/:id).
 - For API changes: list affected endpoints (e.g. GET /api/users).
 - For other changes: one short phrase describing what changed.
+
+## Usage
+One sentence describing what the new thing does, followed by a minimal code example showing how to use it.
+- New API endpoint → curl example
+- New function/method → call-site code example in the repo's language
+- Config change → example config snippet
+- UI route → example URL or component usage
+- No clear new usage surface → omit the code block and write "No direct usage change."
 
 Diff:
 {}"#,
@@ -85,7 +96,7 @@ Diff:
             .header("anthropic-version", "2023-06-01")
             .json(&Request {
                 model: &self.model,
-                max_tokens: 256,
+                max_tokens: 512,
                 messages: vec![Msg { role: "user", content: &prompt }],
             })
             .send()
