@@ -23,7 +23,7 @@ The binary is output to `target/release/terminal`.
 
 ## Configuration
 
-Create a `config.toml` in the directory you run Norse from:
+Create `~/.norse`:
 
 ```toml
 [github]

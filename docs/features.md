@@ -40,7 +40,7 @@ From the diff viewer, press `/` to ask a question about the current diff. Useful
 
 ## Configuration
 
-Create a `config.toml` in the working directory:
+Create `~/.norse`:
 
 ```toml
 [github]

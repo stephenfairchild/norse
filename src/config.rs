@@ -15,8 +15,11 @@ pub struct GithubConfig {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let text = fs::read_to_string("config.toml")
-            .context("could not read config.toml")?;
-        toml::from_str(&text).context("invalid config.toml")
+        let path = dirs::home_dir()
+            .context("could not determine home directory")?
+            .join(".norse");
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))
     }
 }
