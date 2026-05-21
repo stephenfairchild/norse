@@ -45,7 +45,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
-    draw_main(f, chunks[0]);
+    draw_main(f, app, chunks[0]);
     draw_statusbar(f, app, chunks[1]);
 
     if matches!(app.mode, Mode::Picker) {
@@ -56,7 +56,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_main(f: &mut Frame, area: Rect) {
+fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
     let art = [
@@ -75,8 +75,17 @@ fn draw_main(f: &mut Frame, area: Rect) {
         ("q",      "quit"),
     ];
 
+    let cache_label = match app.cache_size_bytes {
+        Some(b) if b >= 1_073_741_824 => format!("memory  {:.1} gb", b as f64 / 1_073_741_824.0),
+        Some(b) if b >= 1_048_576     => format!("memory  {:.1} mb", b as f64 / 1_048_576.0),
+        Some(b) if b >= 1_024         => format!("memory  {:.1} kb", b as f64 / 1_024.0),
+        Some(b)                        => format!("memory  {} b", b),
+        None                           => String::new(),
+    };
+
     let art_width = art.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
-    let content_height = (art.len() + 1 + 1 + 1 + keys.len()) as u16;
+    let extra_lines = if cache_label.is_empty() { 0 } else { 1 };
+    let content_height = (art.len() + 1 + 1 + 1 + extra_lines + keys.len()) as u16;
 
     let mut lines: Vec<Line> = art
         .iter()
@@ -87,6 +96,9 @@ fn draw_main(f: &mut Frame, area: Rect) {
         "source code tools",
         Style::default().fg(GRAY),
     )));
+    if !cache_label.is_empty() {
+        lines.push(Line::from(Span::styled(cache_label, Style::default().fg(GRAY))));
+    }
     lines.push(Line::from(""));
     for (key, desc) in keys {
         lines.push(Line::from(vec![

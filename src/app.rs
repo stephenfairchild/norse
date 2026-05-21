@@ -3,6 +3,26 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+fn norsedata_size() -> Option<u64> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".norsedata");
+    dir_size(&path).ok()
+}
+
+fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            total += dir_size(&entry.path())?;
+        } else {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
 use crate::config::Config;
 use crate::cache::{load_pr_cache, load_repo_context, save_pr_cache};
 use crate::github::{extract_jira, GithubClient, PrComment, PrItem, RepoActivity, RepoPreview};
@@ -154,6 +174,7 @@ pub struct App {
     pub diff_pr_comments_loading: bool,
     pr_comments_tx: mpsc::Sender<Result<Vec<PrComment>, String>>,
     pr_comments_rx: mpsc::Receiver<Result<Vec<PrComment>, String>>,
+    pub cache_size_bytes: Option<u64>,
 }
 
 impl App {
@@ -294,6 +315,7 @@ impl App {
             watch_rx,
             news_tx,
             news_rx,
+            cache_size_bytes: norsedata_size(),
         }
     }
 
