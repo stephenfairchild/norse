@@ -1,0 +1,4 @@
+{
+  "release-type": "rust",
+  "pull-request-header": "Release candidate — review changelog before merging."
+}
